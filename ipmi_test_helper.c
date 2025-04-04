@@ -23,22 +23,22 @@
  *     Unoad a driver.
  *   Cycle <id> <count> <module> [<module> [<module> [...]]]
  *     Cycle loading/unloading the given module(s) as fast as possible.
- *   Command <id> <dev> <addr> <netfn> <cmd> <data>
+ *   Command <id> <devidx> <addr> <netfn> <cmd> <data>
  *     Send a command.
- *   Response <id> <dev> <cid> <addr> <netfn> <cmd> <data>
+ *   Response <id> <devidx> <cid> <addr> <netfn> <cmd> <data>
  *     Send a response.  The <cid> should be the id that came in with the
  *     Command this is a response to.
- *   Broadcast <id> <dev> <addr> <netfn> <cmd> <data>
+ *   Broadcast <id> <devidx> <addr> <netfn> <cmd> <data>
  *     Send a broadcast.
- *   Register <id> <dev> <netfn> <cmd> [<channels>]
+ *   Register <id> <devidx> <netfn> <cmd> [<channels>]
  *     Register for command.
- *   Unregister <id> <dev> <netfn> <cmd> [<channels>]
+ *   Unregister <id> <devidx> <netfn> <cmd> [<channels>]
  *     Unregister for command.
- *   EvEnable <id> <dev> <enable>
+ *   EvEnable <id> <devidx> <enable>
  *     Set event enable (1 or 0 for enable or disable).
- *   Open <id> <dev>
+ *   Open <id> <devidx> <devidx>
  *     Open IPMI device.
- *   Close <id> <dev>
+ *   Close <id> <idx>
  *     Close IPMI device.
  *   Panic <id>
  *     Panic the system to test the panic logs.
@@ -46,6 +46,9 @@
  *     Shut down the program.
  *
  * <dev> is the particular IPMI device, 0-9.
+ * <devidx> is an index into an array of open devices.  Note that you
+ *   can open the same device twice in different indexes, this is useful
+ *   for testing multiple users.
  *
  * <addr> is:
  *   si <channel> <lun> 
@@ -56,17 +59,17 @@
  *   Done <id> [<err>]
  *     Command with the given id has completed.  If <err> is present, there
  *     was an error.
- *   Command <cid> <dev> err <errstr> | <addr> <netfn> <cmd> <data>
+ *   Command <cid> <devidx> err <errstr> | <addr> <netfn> <cmd> <data>
  *     A command from the BMC to handle.  Return the <cid> as <cid> in
  *     the Response.
- *   Event <dev> <data>
+ *   Event <devidx> <data>
  *     An event was received.
- *   Response <id> <dev> err <errstr> |  <addr> <netfn> <cmd> <data>
+ *   Response <id> <devidx> err <errstr> |  <addr> <netfn> <cmd> <data>
  *     Response to a sent command.
- *   ResponseResponse <id> <dev> [<err>]
+ *   ResponseResponse <id> <devidx> [<err>]
  *     Response to a sent response.
- *   Closed <dev>
- *     An error occurred and <dev> was closed.
+ *   Closed <devidx>
+ *     An error occurred and <devidx> was closed.
  *   Shutdown <id>
  *     The program was shut down.
  *   Panic <id>
@@ -75,8 +78,8 @@
  * Note that if the <id> is "-", it means the id couldn't be obtained from
  * the command.
  *
- * Note that <id> and <dev> are decimal numbers.  All other values are
- * hexadecimal.
+ * Note that <id>, <dev> and <devidx> are decimal numbers.  All other
+ * values are hexadecimal.
  */
 
 #include <stdio.h>
@@ -114,11 +117,11 @@ struct ipmiinfo {
     bool closing;
     struct accinfo *ai;
     struct gensio_waiter *close_waiter;
-    unsigned int devnum;
+    unsigned int devidx;
     long next_iid;
     struct gensio_list cmd_rsps;
 };
-#define NUM_IPMI_INFO 5
+#define NUM_IPMI_INFO 10
 
 struct ioinfo {
     struct accinfo *ai;
@@ -140,7 +143,7 @@ struct accinfo {
     struct gensio_waiter *waiter;
     struct gensio_accepter *acc;
     struct gensio_list ios; /* List of ioinfo */
-    struct ipmiinfo *ipis; /* Array of IPMI devices. */
+    struct ipmiinfo *ipis; /* Array of IPMI device opens. */
     bool shutting_down;
 };
 
@@ -344,7 +347,7 @@ add_output_buf_all(struct accinfo *ai, char *str, ...)
 }
 
 static void
-add_output_buf_event_all(struct accinfo *ai, unsigned int devnum,
+add_output_buf_event_all(struct accinfo *ai, unsigned int devidx,
 			 struct ipmi_msg *msg)
 {
     struct sendbuf *s;
@@ -354,7 +357,7 @@ add_output_buf_event_all(struct accinfo *ai, unsigned int devnum,
     if (gensio_list_empty(&ai->ios))
 	return;
 
-    s = al_sprintf_data(ai->o, &sg, 1, "Event %d", devnum);
+    s = al_sprintf_data(ai->o, &sg, 1, "Event %d", devidx);
     if (s)
 	append_output_list_all(ai, s);
 }
@@ -620,11 +623,11 @@ do_close(struct ipmiinfo *ipi)
 	gensio_list_rm(&ipi->cmd_rsps, &crw->link);
 	if (crw->expected_type == IPMI_RESPONSE_RECV_TYPE)
 	    add_output_buf(crw->ii, "Response %llu %d err IPMI device closed",
-			   crw->id, ipi->devnum);
+			   crw->id, ipi->devidx);
 	else
 	    add_output_buf(crw->ii,
 			   "ResponseResponse %llu %d err IPMI device closed",
-			   crw->id, ipi->devnum);
+			   crw->id, ipi->devidx);
 	gensio_os_funcs_zfree(o, crw);
     }
 }
@@ -669,7 +672,7 @@ ipmi_dev_read_ready(struct gensio_iod *iod, void *cb_data)
 	    return;
 	/* Driver has issues, close it. */
 	do_close(ipi);
-	add_output_buf_all(ipi->ai, "Closed %d", ipi->devnum);
+	add_output_buf_all(ipi->ai, "Closed %d", ipi->devidx);
 	return;
     }
 
@@ -679,7 +682,7 @@ ipmi_dev_read_ready(struct gensio_iod *iod, void *cb_data)
 	if (!crw)
 	    return;
 	add_output_buf_msg(crw->ii, recv.addr, &recv.msg,
-			   "Response %llu %d", crw->id, ipi->devnum);
+			   "Response %llu %d", crw->id, ipi->devidx);
 	gensio_os_funcs_zfree(ipi->ai->o, crw);
 	break;
 
@@ -689,21 +692,21 @@ ipmi_dev_read_ready(struct gensio_iod *iod, void *cb_data)
 	    return;
 	if (recv.msg.data[0])
 	    add_output_buf(crw->ii, "ResponseResponse %llu %d %2.2x",
-			   crw->id, ipi->devnum, recv.msg.data[0]);
+			   crw->id, ipi->devidx, recv.msg.data[0]);
 	else
 	    add_output_buf(crw->ii, "ResponseResponse %llu %d",
-			   crw->id, ipi->devnum);
+			   crw->id, ipi->devidx);
 	gensio_os_funcs_zfree(ipi->ai->o, crw);
 	break;
 
     case IPMI_ASYNC_EVENT_RECV_TYPE:
-	add_output_buf_event_all(ipi->ai, ipi->devnum, &recv.msg);
+	add_output_buf_event_all(ipi->ai, ipi->devidx, &recv.msg);
 	break;
 
     case IPMI_CMD_RECV_TYPE:
 	add_output_buf_msg_all(ipi->ai, recv.addr, &recv.msg,
 			       "Command %lld %d",
-			       (long long) recv.msgid, ipi->devnum);
+			       (long long) recv.msgid, ipi->devidx);
 	break;
 
     default:
@@ -724,70 +727,75 @@ handle_open(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct ipmiinfo *ipi = ii->ai->ipis;
     struct gensio_os_funcs *o = ii->ai->o;
-    unsigned int dev;
+    unsigned int devidx, devnum;
     char devstr[128];
     int rv;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
 
-    if (ipi[dev].fd != -1) {
-	add_output_buf(ii, "Done %llu id %s already in use", id, tokens[0]);
+    if (ipi[devidx].fd != -1) {
+	add_output_buf(ii, "Done %llu devidx %s already in use", id, tokens[0]);
 	return;
     }
 
-    snprintf(devstr, sizeof(devstr), "/dev/ipmi%u", dev);
+    if (!get_num(tokens[1], &devnum) || devnum >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[1]);
+	return;
+    }
 
-    ipi[dev].fd = open(devstr, O_RDWR | O_NONBLOCK);
-    if (ipi[dev].fd == -1) {
+    snprintf(devstr, sizeof(devstr), "/dev/ipmi%u", devnum);
+
+    ipi[devidx].fd = open(devstr, O_RDWR | O_NONBLOCK);
+    if (ipi[devidx].fd == -1) {
 	add_output_buf(ii, "Done %llu Unable to open dev %s: %s", id,
 		       devstr, strerror(errno));
 	return;
     }
 
-    rv = o->add_iod(o, GENSIO_IOD_DEV, ipi[dev].fd, &ipi[dev].iod);
+    rv = o->add_iod(o, GENSIO_IOD_DEV, ipi[devidx].fd, &ipi[devidx].iod);
     if (rv) {
 	add_output_buf(ii, "Done %llu Unable to set iod %s: %s", id,
 		       devstr, gensio_err_to_str(rv));
-	close(ipi[dev].fd);
-	ipi[dev].fd = -1;
+	close(ipi[devidx].fd);
+	ipi[devidx].fd = -1;
 	return;
     }
 
-    rv = o->set_fd_handlers(ipi[dev].iod, &ipi[dev], ipmi_dev_read_ready,
+    rv = o->set_fd_handlers(ipi[devidx].iod, &ipi[devidx], ipmi_dev_read_ready,
 			    NULL, NULL, ipmi_dev_cleared);
     if (rv) {
 	add_output_buf(ii, "Done %llu Unable to setup fd %s: %s", id,
 		       devstr, gensio_err_to_str(rv));
-	o->close(&ipi[dev].iod);
-	ipi[dev].fd = -1;
+	o->close(&ipi[devidx].iod);
+	ipi[devidx].fd = -1;
 	return;
     }
 
     add_output_buf(ii, "Done %llu", id);
 
-    o->set_read_handler(ipi[dev].iod, true);
+    o->set_read_handler(ipi[devidx].iod, true);
 }
 
 static void
 handle_close(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct ipmiinfo *ipi = ii->ai->ipis;
-    unsigned int dev;
+    unsigned int devidx;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
 	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
 	return;
     }
 
-    if (ipi[dev].fd == -1 || ipi[dev].closing) {
+    if (ipi[devidx].fd == -1 || ipi[devidx].closing) {
 	add_output_buf(ii, "Done %llu id %s not open", id, tokens[0]);
 	return;
     }
 
-    do_close(&ipi[dev]);
+    do_close(&ipi[devidx]);
     add_output_buf(ii, "Done %llu", id);
 }
 
@@ -1014,7 +1022,7 @@ parse_data(struct ioinfo *ii, unsigned long long id, const char **tokens,
 static void
 handle_command(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
-    unsigned int dev;
+    unsigned int devidx;
     struct ipmi_addr addr;
     unsigned char data[256];
     unsigned int i, num;
@@ -1028,11 +1036,11 @@ handle_command(struct ioinfo *ii, unsigned long long id, const char **tokens)
     req.addr = (unsigned char *) &addr;
     req.msg.data = data;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
-    ipi = &ii->ai->ipis[dev];
+    ipi = &ii->ai->ipis[devidx];
     if (ipi->fd == -1) {
 	add_output_buf(ii, "Done %llu dev not open", id);
 	return;
@@ -1082,7 +1090,7 @@ handle_command(struct ioinfo *ii, unsigned long long id, const char **tokens)
 static void
 handle_response(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
-    unsigned int dev;
+    unsigned int devidx;
     struct ipmi_addr addr;
     unsigned char data[256];
     unsigned int i, num;
@@ -1098,13 +1106,13 @@ handle_response(struct ioinfo *ii, unsigned long long id, const char **tokens)
     req.addr = (unsigned char *) &addr;
     req.msg.data = data;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
-    ipi = &ii->ai->ipis[dev];
+    ipi = &ii->ai->ipis[devidx];
     if (ipi->fd == -1) {
-	add_output_buf(ii, "Done %llu dev not open", id);
+	add_output_buf(ii, "Done %llu devidx not open", id);
 	return;
     }
 
@@ -1160,15 +1168,15 @@ static void
 handle_register(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct ipmiinfo *ipi;
-    unsigned int dev, num;
+    unsigned int devidx, num;
     struct ipmi_cmdspec_chans cs;
     int rv;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
-    ipi = &ii->ai->ipis[dev];
+    ipi = &ii->ai->ipis[devidx];
     if (ipi->fd == -1) {
 	add_output_buf(ii, "Done %llu dev not open", id);
 	return;
@@ -1207,15 +1215,15 @@ static void
 handle_unregister(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct ipmiinfo *ipi;
-    unsigned int dev, num;
+    unsigned int devidx, num;
     struct ipmi_cmdspec_chans cs;
     int rv;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
-    ipi = &ii->ai->ipis[dev];
+    ipi = &ii->ai->ipis[devidx];
     if (ipi->fd == -1) {
 	add_output_buf(ii, "Done %llu dev not open", id);
 	return;
@@ -1254,14 +1262,14 @@ static void
 handle_evenable(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct ipmiinfo *ipi;
-    unsigned int dev, enable;
+    unsigned int devidx, enable;
     int rv;
 
-    if (!get_num(tokens[0], &dev) || dev >= NUM_IPMI_INFO) {
-	add_output_buf(ii, "Done %llu invalid dev: %s", id, tokens[0]);
+    if (!get_num(tokens[0], &devidx) || devidx >= NUM_IPMI_INFO) {
+	add_output_buf(ii, "Done %llu invalid devidx: %s", id, tokens[0]);
 	return;
     }
-    ipi = &ii->ai->ipis[dev];
+    ipi = &ii->ai->ipis[devidx];
     if (ipi->fd == -1) {
 	add_output_buf(ii, "Done %llu dev not open", id);
 	return;
@@ -1528,7 +1536,7 @@ main(int argc, char *argv[])
     for (i = 0; i < NUM_IPMI_INFO; i++) {
 	ipis[i].fd = -1;
 	ipis[i].ai = &ai;
-	ipis[i].devnum = i;
+	ipis[i].devidx = i;
 	gensio_list_init(&ipis[i].cmd_rsps);
 	ipis[i].close_waiter = gensio_os_funcs_alloc_waiter(ai.o);
 	if (!ipis[i].close_waiter) {
