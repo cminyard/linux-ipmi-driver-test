@@ -17,9 +17,9 @@
  * the modules to be in the current directory.  We don't use the kernel
  * built by yocto/distro, as we are testing a new kernel.
  *
- *   Load <id> msghandler|si|smbus|devintf
+ *   Load <id> ipmi_msghandler|ipmi_si|ipmi_smbus|ipmi_devintf
  *     Load a driver.
- *   Unload <id> msghandler|si|smbus|devintf
+ *   Unload <id> ipmi_msghandler|ipmi_si|ipmi_smbus|ipmi_devintf
  *     Unoad a driver.
  *   Cycle <id> <count> <module> [<module> [<module> [...]]]
  *     Cycle loading/unloading the given module(s) as fast as possible.
@@ -829,7 +829,7 @@ handle_load(struct ioinfo *ii, unsigned long long id, const char **tokens)
     }
 
     snprintf(loadcmdstr, sizeof(loadcmdstr),
-	     "stdio(stderr-to-stdout),insmod ipmi_%s.ko", tokens[0]);
+	     "stdio(stderr-to-stdout),insmod %s.ko", tokens[0]);
     if (!run_cmd(ii, id, loadcmdstr))
 	add_output_buf(ii, "Done %llu", id);
 }
@@ -845,7 +845,7 @@ handle_unload(struct ioinfo *ii, unsigned long long id, const char **tokens)
     }
 
     snprintf(loadcmdstr, sizeof(loadcmdstr),
-	     "stdio(stderr-to-stdout),rmmod ipmi_%s", tokens[0]);
+	     "stdio(stderr-to-stdout),rmmod %s", tokens[0]);
     if (!run_cmd(ii, id, loadcmdstr))
 	add_output_buf(ii, "Done %llu", id);
 }

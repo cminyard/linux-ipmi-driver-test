@@ -14,7 +14,7 @@ export PATH="${PATH:+$PATH:}/usr/sbin:/sbin"
 case "$1" in
   start)
 	echo "Starting ipmi test helper"
-	start-stop-daemon -b -S -p $PIDFILE -x /usr/bin/ipmi_test_helper tcp,2000
+	(cd /home/root; start-stop-daemon -b -S -p $PIDFILE -x /usr/bin/ipmi_test_helper tcp,2000)
 	echo "done."
 	;;
   stop)
@@ -35,7 +35,7 @@ case "$1" in
 	check_for_no_start
 	check_privsep_dir
 	sleep 2
-	start-stop-daemon -b -S -p $PIDFILE -x /usr/bin/ipmi_test_helper -- $SSHD_OPTS
+	(cd /home/root; start-stop-daemon -b -S -p $PIDFILE -x /usr/bin/ipmi_test_helper -- $SSHD_OPTS)
 	echo "."
 	;;
 

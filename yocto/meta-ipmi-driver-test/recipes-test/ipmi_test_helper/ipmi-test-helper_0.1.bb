@@ -25,7 +25,7 @@ do_configure () {
 }
 
 do_compile () {
-	${CC} -o ipmi_test_helper -g -Wall ipmi_test_helper.c -lgensio -lgensioosh ${LDFLAGS}
+	${CC} ${CFLAGS} -o ipmi_test_helper ipmi_test_helper.c -lgensio -lgensioosh ${LDFLAGS}
 }
 
 do_install () {
