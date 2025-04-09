@@ -80,6 +80,13 @@
  *
  * Note that <id>, <dev> and <devidx> are decimal numbers.  All other
  * values are hexadecimal.
+ *
+ * With the lan.conf set up as it is now, there are 3 IPMI devices.
+ * If you load ipmi_si first, then a BT interface connected to BMC 0
+ * (the one simulated in ipmi_sim) is ipmi0, a KCS interface connected
+ * to BMC 1 (one simulated inside qemu) is ipmi1.  Then if you load
+ * ipmi_ssif, ipmi2 will be connected to BMC 0 as a second interface
+ * to the same BMC.
  */
 
 #include <stdio.h>
@@ -1411,8 +1418,7 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	}
 	*buflen = i; /* We processed the characters up to the new line. */
 
-	/* Do the response after the echo, if it's ready. */
-	if (handle_it)
+	if (handle_it && ii->inbuf_len > 0)
 	    handle_buf(ii);
 	return 0;
 
