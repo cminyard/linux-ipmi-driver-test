@@ -837,32 +837,44 @@ static void
 handle_load(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     char loadcmdstr[128];
+    unsigned int i;
 
     if (!tokens[0]) {
 	add_output_buf(ii, "Done %llu No module given", id);
 	return;
     }
 
-    snprintf(loadcmdstr, sizeof(loadcmdstr),
-	     "stdio(stderr-to-stdout),insmod %s.ko", tokens[0]);
-    if (!run_cmd(ii, id, loadcmdstr))
-	add_output_buf(ii, "Done %llu", id);
+    for (i = 0; tokens[i]; i++) {
+	snprintf(loadcmdstr, sizeof(loadcmdstr),
+		 "stdio(stderr-to-stdout),insmod %s.ko", tokens[i]);
+	if (run_cmd(ii, id, loadcmdstr))
+	    goto out;
+    }
+    add_output_buf(ii, "Done %llu", id);
+ out:
+    return;
 }
 
 static void
 handle_unload(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     char loadcmdstr[128];
+    unsigned int i;
 
     if (!tokens[0]) {
 	add_output_buf(ii, "Done %llu No module given", id);
 	return;
     }
 
-    snprintf(loadcmdstr, sizeof(loadcmdstr),
-	     "stdio(stderr-to-stdout),rmmod %s", tokens[0]);
-    if (!run_cmd(ii, id, loadcmdstr))
-	add_output_buf(ii, "Done %llu", id);
+    for (i = 0; tokens[i]; i++) {
+	snprintf(loadcmdstr, sizeof(loadcmdstr),
+		 "stdio(stderr-to-stdout),rmmod %s", tokens[i]);
+	if (run_cmd(ii, id, loadcmdstr))
+	    goto out;
+    }
+    add_output_buf(ii, "Done %llu", id);
+ out:
+    return;
 }
 
 static void
@@ -1402,7 +1414,6 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	for (i = 0; i < len; i++) {
 	    if (buf[i] == '\n' || buf[i] == '\r') {
 		ii->inbuf[ii->inbuf_len] = '\0';
-		ii->inbuf_len = 0;
 		/*
 		 * Note that you could continue to process characters
 		 * but this demonstrates that you can process partial
@@ -1418,8 +1429,10 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	}
 	*buflen = i; /* We processed the characters up to the new line. */
 
-	if (handle_it && ii->inbuf_len > 0)
+	if (handle_it && ii->inbuf_len > 0) {
 	    handle_buf(ii);
+	    ii->inbuf_len = 0;
+	}
 	return 0;
 
     case GENSIO_EVENT_WRITE_READY:
