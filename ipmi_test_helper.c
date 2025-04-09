@@ -44,6 +44,8 @@
  *     Panic the system to test the panic logs.
  *   Quit <id>
  *     Shut down the program.
+ *   Runcmd <id> <shell command>
+ *     Run the given command and return the response in Runrsp
  *
  * <dev> is the particular IPMI device, 0-9.
  * <devidx> is an index into an array of open devices.  Note that you
@@ -74,12 +76,13 @@
  *     The program was shut down.
  *   Panic <id>
  *     The system is about to panic.
+ *   Runrsp <id> <return code> <output>
  *
  * Note that if the <id> is "-", it means the id couldn't be obtained from
  * the command.
  *
- * Note that <id>, <dev> and <devidx> are decimal numbers.  All other
- * values are hexadecimal.
+ * Note that <id>, <return code. <dev> and <devidx> are decimal
+ * numbers.  All other values are hexadecimal.
  *
  * With the lan.conf set up as it is now, there are 3 IPMI devices.
  * If you load ipmi_si first, then a BT interface connected to BMC 0
@@ -218,7 +221,7 @@ sendbuf_dup(struct gensio_os_funcs *o, const struct sendbuf *s)
 }
 
 static struct sendbuf *
-al_vsprintf(struct gensio_os_funcs *o, char *str, va_list ap)
+al_vsprintf(struct gensio_os_funcs *o, char endc, char *str, va_list ap)
 {
     struct sendbuf *s;
     va_list ap2;
@@ -235,7 +238,7 @@ al_vsprintf(struct gensio_os_funcs *o, char *str, va_list ap)
     s->data = ((unsigned char *) s) + sizeof(*s);
     vsnprintf((char *) s->data, len + 1, str, ap2);
     va_end(ap2);
-    s->data[len] = '\n';
+    s->data[len] = endc;
     s->data[len + 1] = '\0';
 
     return s;
@@ -307,7 +310,22 @@ add_output_buf(struct ioinfo *ii, char *str, ...)
     struct sendbuf *s;
 
     va_start(ap, str);
-    s = al_vsprintf(ii->ai->o, str, ap);
+    s = al_vsprintf(ii->ai->o, '\n', str, ap);
+    va_end(ap);
+
+    gensio_list_add_tail(&ii->writelist, &s->link);
+    gensio_set_write_callback_enable(ii->io, true);
+}
+
+__attribute__ ((__format__ (__printf__, 2, 3)))
+static void
+add_output_msgrsp(struct ioinfo *ii, char *str, ...)
+{
+    va_list ap;
+    struct sendbuf *s;
+
+    va_start(ap, str);
+    s = al_vsprintf(ii->ai->o, '\0', str, ap);
     va_end(ap);
 
     gensio_list_add_tail(&ii->writelist, &s->link);
@@ -345,7 +363,7 @@ add_output_buf_all(struct accinfo *ai, char *str, ...)
 	return;
 
     va_start(ap, str);
-    s = al_vsprintf(ai->o, str, ap);
+    s = al_vsprintf(ai->o, '\n', str, ap);
     va_end(ap);
     if (!s)
 	return;
@@ -539,6 +557,7 @@ run_cmd(struct ioinfo *ii, unsigned long long id, const char *loadcmdstr)
     int rv, rc;
     gensiods count, pos;
     char buf[1024], ibuf[8], dummy[128];
+    gensio_time timeout = { 10, 0 };
 
     rv = str_to_gensio(loadcmdstr, o, NULL, NULL, &io);
     if (rv) {
@@ -565,12 +584,13 @@ run_cmd(struct ioinfo *ii, unsigned long long id, const char *loadcmdstr)
     pos = 0;
     while (rv == 0) {
 	if (pos < sizeof(buf) - 1) {
-	    rv = gensio_read_s(io, &count, buf + pos, sizeof(buf) - pos, NULL);
+	    rv = gensio_read_s(io, &count, buf + pos, sizeof(buf) - pos,
+			       &timeout);
 	    if (!rv)
 		pos += count;
 	} else {
 	    /* Throw away data after the buf size. */
-	    rv = gensio_read_s(io, NULL, dummy, sizeof(dummy), NULL);
+	    rv = gensio_read_s(io, NULL, dummy, sizeof(dummy), &timeout);
 	}
     }
 
@@ -899,13 +919,13 @@ handle_cycle(struct ioinfo *ii, unsigned long long id, const char **tokens)
     for (i = 0; i < count; i++) {
 	for (j = 1; tokens[j]; j++) {
 	    snprintf(loadcmdstr, sizeof(loadcmdstr),
-		     "stdio(stderr-to-stdout),insmod ipmi_%s.ko", tokens[j]);
+		     "stdio(stderr-to-stdout),insmod %s.ko", tokens[j]);
 	    if (run_cmd(ii, id, loadcmdstr))
 		return;
 	}
 	for (j--; j > 0; j--) {
 	    snprintf(loadcmdstr, sizeof(loadcmdstr),
-		     "stdio(stderr-to-stdout),rmmod ipmi_%s", tokens[j]);
+		     "stdio(stderr-to-stdout),rmmod %s", tokens[j]);
 	    if (run_cmd(ii, id, loadcmdstr))
 		return;
 	}
@@ -1308,6 +1328,92 @@ handle_evenable(struct ioinfo *ii, unsigned long long id, const char **tokens)
 }
 
 static void
+handle_runcmd(struct ioinfo *ii, unsigned long long id, const char **tokens)
+{
+    int rv, rc;
+    struct gensio *cmd;
+    gensio_time timeout = { 10, 0 };
+    gensiods count, pos;
+    char buf[1024], ibuf[8], dummy[128];
+
+    if (!tokens[0]) {
+	add_output_buf(ii, "Done %llu No command given", id);
+	return;
+    }
+
+    rv = str_to_gensio("stdio(stderr-to-stdout)", ii->ai->o, NULL, NULL, &cmd);
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to allocate gensio: %s", id,
+		       gensio_err_to_str(rv));
+	return;
+    }
+
+    rv = gensio_control(cmd, 0, GENSIO_CONTROL_SET, GENSIO_CONTROL_ARGS,
+			(char *) tokens, NULL);
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to set stdio args: %s", id,
+		       gensio_err_to_str(rv));
+	goto out_err;
+    }
+
+    rv = gensio_open_s(cmd);
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to open stdio: %s", id,
+		       gensio_err_to_str(rv));
+	goto out_err;
+    }
+
+    rv = gensio_set_sync(cmd);
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to set stdio sync: %s", id,
+		       gensio_err_to_str(rv));
+	goto out_err;
+    }
+
+    rv = 0;
+    pos = 0;
+    while (!rv) {
+	if (pos < sizeof(buf) - 1) {
+	    rv = gensio_read_s(cmd, &count, buf + pos, sizeof(buf) - pos,
+			       &timeout);
+	    if (!rv)
+		pos += count;
+	} else {
+	    /* Throw away data after the buf size. */
+	    rv = gensio_read_s(cmd, NULL, dummy, sizeof(dummy), &timeout);
+	}
+    }
+    buf[pos] = '\0';
+
+    rv = GE_INPROGRESS;
+    while (rv == GE_INPROGRESS) {
+	count = sizeof(ibuf);
+	rv = gensio_control(cmd, 0, GENSIO_CONTROL_GET, GENSIO_CONTROL_WAIT_TASK,
+			    ibuf, &count);
+    }
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to wait on stdio: %s", id,
+		       gensio_err_to_str(rv));
+	goto out_err;
+    }
+    rc = atoi(ibuf);
+
+    rv = gensio_close_s(cmd);
+    if (rv) {
+	add_output_buf(ii, "Done %llu Unable to close stdio: %s", id,
+		       gensio_err_to_str(rv));
+	goto out_err;
+    }
+
+    add_output_msgrsp(ii, "Runrsp %llu %d %s", id, rc, buf);
+
+    return;
+
+ out_err:
+    gensio_free(cmd);
+}
+
+static void
 handle_quit(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct accinfo *ai = ii->ai;
@@ -1344,6 +1450,7 @@ static struct {
     { "Register", handle_register },
     { "Unregister", handle_unregister },
     { "EvEnable", handle_evenable },
+    { "Runcmd", handle_runcmd },
     {}
 };
 
@@ -1414,11 +1521,6 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	for (i = 0; i < len; i++) {
 	    if (buf[i] == '\n' || buf[i] == '\r') {
 		ii->inbuf[ii->inbuf_len] = '\0';
-		/*
-		 * Note that you could continue to process characters
-		 * but this demonstrates that you can process partial
-		 * buffers, which can sometimes simplify code.
-		 */
 		handle_it = true;
 		i++;
 		break;
