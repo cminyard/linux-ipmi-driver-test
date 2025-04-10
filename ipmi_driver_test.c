@@ -2,12 +2,15 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <gensio/gensio.h>
 #include <gensio/gensio_openipmi_oshandler.h>
 #include <gensio/gensio_list.h>
 #include <OpenIPMI/ipmiif.h>
 #include <OpenIPMI/ipmi_conn.h>
 #include <OpenIPMI/internal/ipmi_event.h>
+
+static int debug;
 
 struct tinfo;
 
@@ -18,6 +21,8 @@ struct sendbuf {
     gensiods pos;
     unsigned char *data;
     unsigned long long id;
+    bool free_after_send;
+    bool needs_resp;
     bool sent;
     bool done;
     bool got_resp;
@@ -134,13 +139,26 @@ helper_vsend(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
     s = alloc_sendbuf(ti, cmd, str, ap);
     gensio_list_add_tail(&ti->writelist, &s->link);
     gensio_set_write_callback_enable(ti->helper, true);
+    s->needs_resp = strcmp(cmd, "Command") == 0 || strcmp(cmd, "Response") == 0;
 
     return s;
 }
 
+static void
+i_pr_err(const char *file, unsigned int line, char *fmt, ...)
+{
+    va_list ap;
+
+    fprintf(stderr, "%s Line %u: ", file, line);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
+
 __attribute__ ((__format__ (__printf__, 3, 4)))
 static struct sendbuf *
-helper_send(struct tinfo *ti, const char *cmd, const char *str, ...)
+helper_send_cmd(struct tinfo *ti, const char *cmd, const char *str, ...)
 {
     va_list ap;
     struct sendbuf *s;
@@ -148,6 +166,10 @@ helper_send(struct tinfo *ti, const char *cmd, const char *str, ...)
     va_start(ap, str);
     s = helper_vsend(ti, cmd, str, ap);
     va_end(ap);
+    if (!s) {
+	pr_err("Out of memory sending command '%s %s\n", cmd, str);
+	return NULL;
+    }
 
     return s;
 }
@@ -158,14 +180,35 @@ helper_wait_done(struct sendbuf *sb)
     gensio_time timeout = { 10, 0 };
     int rv;
 
-    while (!sb->done && !sb->ti->rv) {
-	rv = gensio_os_funcs_service(sb->ti->o, &timeout);
-	if (rv && rv != GE_INTERRUPTED)
-	    return rv;
+    if (sb->needs_resp) {
+	while (!sb->got_resp && !sb->rc && !sb->ti->rv) {
+	    rv = gensio_os_funcs_service(sb->ti->o, &timeout);
+	    if (rv && rv != GE_INTERRUPTED)
+		return rv;
+	}
+    } else {
+	while (!sb->done && !sb->ti->rv) {
+	    rv = gensio_os_funcs_service(sb->ti->o, &timeout);
+	    if (rv && rv != GE_INTERRUPTED)
+		return rv;
+	}
     }
     if (!sb->got_resp && sb->response[0])
 	return -1;
     return 0;
+}
+
+static void
+helper_wait_done_print_err(int rv, struct sendbuf *sb,
+			   const char *cmd, const char *str)
+{
+    if (rv > 0) {
+	pr_err("Command %s %s: Error waiting on sendbuf: %s\n",
+	       cmd, str, gensio_err_to_str(rv));
+    } else if (rv < 0) {
+	pr_err("Command %s %s: Load error response: %s\n",
+	       cmd, str, sb->response);
+    }
 }
 
 __attribute__ ((__format__ (__printf__, 4, 5)))
@@ -182,17 +225,12 @@ helper_cmd_resp(struct tinfo *ti, struct sendbuf **rsb,
     va_end(ap);
 
     if (!sb) {
-	fprintf(stderr, "Unable to send command '%s %s'", cmd, str);
+	pr_err("Unable to send command '%s %s'", cmd, str);
 	return 1;
     }
     rv = helper_wait_done(sb);
-    if (rv > 0) {
-	fprintf(stderr, "Command %s %s: Error waiting on sendbuf: %s\n",
-		cmd, str, gensio_err_to_str(rv));
-	rv = 1;
-    } else if (rv < 0) {
-	fprintf(stderr, "Command %s %s: Load error response: %s\n",
-		cmd, str, sb->response);
+    if (rv) {
+	helper_wait_done_print_err(rv, sb, cmd, str);
 	rv = 1;
     }
     if (rsb)
@@ -226,6 +264,29 @@ test_load_unload(struct tinfo *ti)
 }
 
 static int
+verify_file_contents(struct tinfo *ti, const char *dir, const char *file,
+		     const char *contents)
+{
+    int rv;
+    struct sendbuf *sb;
+
+    rv = helper_cmd_resp(ti, &sb, "Runcmd", "cat %s/%s", dir, file);
+    if (rv)
+	return rv;
+    if (sb->rc) {
+	pr_err("Unable to cat %s/%s\n", dir, file);
+	return 1;
+    }
+    if (strcmp(contents, sb->response) != 0) {
+	pr_err("Contents of %s/%s don't match, expected '%s', got '%s'\n",
+	       dir, file, contents, sb->response);
+	return 1;
+    }
+    sendbuf_unlink_free(ti, sb);
+    return 0;
+}
+
+static int
 test_bmcs(struct tinfo *ti)
 {
     int rv;
@@ -241,7 +302,7 @@ test_bmcs(struct tinfo *ti)
     if (rv)
 	return rv;
     if (sb->rc) {
-	fprintf(stderr, "Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
+	pr_err("Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
 	sendbuf_unlink_free(ti, sb);
 	return 1;
     }
@@ -252,14 +313,14 @@ test_bmcs(struct tinfo *ti)
 	    if (strcmp(t, "ipmi_bmc.0") == 0) {
 		found = true;
 	    } else {
-		fprintf(stderr, "Unknown BMC on system: %s\n", t);
+		pr_err("Unknown BMC on system: %s\n", t);
 		return 1;
 	    }
 	}
 	t = strtok_r(NULL, "\n", &saveptr);
     }
     if (!found) {
-	fprintf(stderr, "ipmi_bmc.0 not found on system: %s\n", t);
+	pr_err("ipmi_bmc.0 not found on system: %s\n", t);
 	return 1;
     }
 
@@ -273,7 +334,7 @@ test_bmcs(struct tinfo *ti)
     if (rv)
 	return rv;
     if (sb->rc) {
-	fprintf(stderr, "Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
+	pr_err("Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
 	sendbuf_unlink_free(ti, sb);
 	return 1;
     }
@@ -287,22 +348,73 @@ test_bmcs(struct tinfo *ti)
 	    } else if (strcmp(t, "ipmi_bmc.1") == 0) {
 		found2 = true;
 	    } else {
-		fprintf(stderr, "Unknown BMC on system: %s\n", t);
+		pr_err("Unknown BMC on system: %s\n", t);
 		return 1;
 	    }
 	}
 	t = strtok_r(NULL, "\n", &saveptr);
     }
     if (!found) {
-	fprintf(stderr, "ipmi_bmc.0 not found on system: %s\n", t);
+	pr_err("ipmi_bmc.0 not found on system: %s\n", t);
 	return 1;
     }
     if (!found2) {
-	fprintf(stderr, "ipmi_bmc.1 not found on system: %s\n", t);
+	pr_err("ipmi_bmc.1 not found on system: %s\n", t);
 	return 1;
     }
-
     sendbuf_unlink_free(ti, sb);
+
+    /* Verify ipmisim fields, must match ipmisim1.emu. */
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "device_id", "0\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "provides_device_sdrs", "0\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "revision", "3\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "firmware_revision", "9.8\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "additional_device_support", "0x9f\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "manufacturer_id", "0x001291\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "product_id", "0x0f02\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "ipmi_version", "2.0\n"))
+	return 1;
+
+    /* Verify simulated fields, must match what's in qemu's ipmi_bmc_sim.c. */
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "device_id", "32\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "provides_device_sdrs", "0\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "revision", "0\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "firmware_revision", "0.0\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "additional_device_support", "0x07\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "manufacturer_id", "0x000000\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
+			     "product_id", "0x0000\n"))
+	return 1;
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+			     "ipmi_version", "2.0\n"))
+	return 1;
 
     rv = helper_cmd_resp(ti, NULL, "Unload",
 			 "ipmi_si ipmi_ssif ipmi_devintf ipmi_msghandler i2c-i801");
@@ -313,7 +425,7 @@ test_bmcs(struct tinfo *ti)
     if (rv)
 	return rv;
     if (sb->rc) {
-	fprintf(stderr, "Dump BMCs 2 failed (%d): %s\n", sb->rc, sb->response);
+	pr_err("Dump BMCs 2 failed (%d): %s\n", sb->rc, sb->response);
 	sendbuf_unlink_free(ti, sb);
 	return 1;
     }
@@ -321,11 +433,162 @@ test_bmcs(struct tinfo *ti)
     t = strtok_r(sb->response, "\n", &saveptr);
     while(t) {
 	if (strncmp(t, "ipmi_bmc.", 9) == 0) {
-	    fprintf(stderr, "Unknown BMC on system: %s\n", t);
+	    pr_err("Unknown BMC on system: %s\n", t);
 	    return 1;
 	}
 	t = strtok_r(NULL, "\n", &saveptr);
     }
+    sendbuf_unlink_free(ti, sb);
+
+    return 0;
+}
+
+static int
+test_cmd(struct tinfo *ti)
+{
+    int rv;
+    struct sendbuf *sb, *sb2, *sb3, *sb4;
+    static char *bmc0_getdevid_rsp =
+	" 0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
+    static char *mc30_getdevid_rsp =
+	" 0 ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00";
+    unsigned int count;
+    unsigned int restart_count = 0;
+    const char *module = "ipmi_ssif";
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_ssif");
+    if (rv)
+	return rv;
+
+ restart:
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc0_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb->response);
+	sendbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    sendbuf_unlink_free(ti, sb);
+
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 ipmb 0 30 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, mc30_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb->response);
+	sendbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    sendbuf_unlink_free(ti, sb);
+
+    /* Send a number of commands and wait for all the responses. */
+    sb = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
+    if (!sb)
+	return 1;
+    sb2 = helper_send_cmd(ti, "Command", "0 ipmb 0 30 0 6 1");
+    if (!sb2)
+	return 1;
+    sb3 = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
+    if (!sb3)
+	return 1;
+    sb4 = helper_send_cmd(ti, "Command", "0 ipmb 0 30 0 6 1");
+    if (!sb4)
+	return 1;
+    rv = helper_wait_done(sb4);
+    if (rv)
+	return rv;
+    if (strcmp(sb4->response, mc30_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb4->response);
+	return 1;
+    }
+    rv = helper_wait_done(sb3);
+    if (rv)
+	return rv;
+    if (strcmp(sb3->response, bmc0_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb3->response);
+	return 1;
+    }
+    rv = helper_wait_done(sb2);
+    if (rv)
+	return rv;
+    if (strcmp(sb2->response, mc30_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb2->response);
+	return 1;
+    }
+    rv = helper_wait_done(sb);
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc0_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb->response);
+	return 1;
+    }
+    sendbuf_unlink_free(ti, sb4);
+    sendbuf_unlink_free(ti, sb3);
+    sendbuf_unlink_free(ti, sb2);
+    sendbuf_unlink_free(ti, sb);
+
+    /* Send a command and close. */
+    sb3 = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
+    if (!sb3)
+	return 1;
+    /* Response may or may not make it back, but just ignore it. */
+    sb3->free_after_send = true;
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    count = 0;
+    rv = 1;
+    sb = helper_send_cmd(ti, "Unload", "%s", module);
+    if (!sb)
+	return 1;
+    while (rv) {
+	/*
+	 * The close an take a bit of time to complete, so the module
+	 * may still be in use for a bit.
+	 */
+	rv = helper_wait_done(sb);
+	count++;
+	if (count > 10)
+	    break;
+	if (rv) {
+	    sendbuf_unlink_free(ti, sb);
+	    sleep(1);
+	    sb = helper_send_cmd(ti, "Unload", "%s", module);
+	    if (!sb)
+		return 1;
+	}
+    }
+    if (rv) {
+	helper_wait_done_print_err(rv, sb, "Unload", module);
+	return 1;
+    }
+    sendbuf_unlink_free(ti, sb);
+
+    if (restart_count == 0) {
+	restart_count++;
+	rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_si");
+	if (rv)
+	    return 1;
+	module = "ipmi_si";
+	goto restart;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_msghandler i2c-i801");
+    if (rv)
+	return rv;
 
     return 0;
 }
@@ -336,6 +599,7 @@ struct teststr {
 } tests[] = {
     { "Test loading and unloading modules", test_load_unload },
     { "Test BMC creation and removal", test_bmcs },
+    { "Test basic commands", test_cmd },
     {}
 };
 
@@ -424,16 +688,23 @@ handle_buf(struct tinfo *ti)
     char *end;
     struct sendbuf *sb;
 
+    if (debug)
+	printf("Recv: '%s'\n", ti->inbuf);
     if (strcmp(ti->inbuf, "Ready") == 0) {
 	/* Just ignore this. */
     } else if (strncmp(ti->inbuf, "Done ", 5) == 0) {
 	end = ti->inbuf + 5;
 	sb = find_waiting_sendbuf(ti, &end);
 	if (!sb) {
-	    fprintf(stderr, "Unknown response: %s\n", ti->inbuf);
+	    pr_err("Unknown done: %s\n", ti->inbuf);
+	} else if (!sb->needs_resp && sb->free_after_send) {
+	    sendbuf_unlink_free(ti, sb);
 	} else {
-	    if (*end == ' ')
+	    if (*end == ' ') {
+		/* Got an error. */
+		sb->rc = 1;
 		end++;
+	    }
 	    copy_string(sb->response, end, sizeof(sb->response));
 	    sb->done = true;
 	}
@@ -441,7 +712,7 @@ handle_buf(struct tinfo *ti)
 	end = ti->inbuf + 7;
 	sb = find_waiting_sendbuf(ti, &end);
 	if (!sb) {
-	    fprintf(stderr, "Unknown response: %s\n", ti->inbuf);
+	    pr_err("Unknown Runrsp: %s\n", ti->inbuf);
 	} else {
 	    if (*end == ' ')
 		end++;
@@ -452,8 +723,32 @@ handle_buf(struct tinfo *ti)
 	    sb->done = true;
 	    sb->got_resp = true;
 	}
+    } else if (strncmp(ti->inbuf, "Response ", 9) == 0) {
+	end = ti->inbuf + 9;
+	sb = find_waiting_sendbuf(ti, &end);
+	if (!sb) {
+	    pr_err("Unknown response: %s\n", ti->inbuf);
+	} else if (sb->free_after_send) {
+	    sendbuf_unlink_free(ti, sb);
+	} else if (!sb->done) {
+	    pr_err("Response without done: %s\n", ti->inbuf);
+	} else {
+	    copy_string(sb->response, end, sizeof(sb->response));
+	    sb->got_resp = true;
+	}
+    } else if (strncmp(ti->inbuf, "ResponseResponse ", 17) == 0) {
+	end = ti->inbuf + 17;
+	sb = find_waiting_sendbuf(ti, &end);
+	if (!sb) {
+	    pr_err("Unknown responseresponse: %s\n", ti->inbuf);
+	} else if (!sb->done) {
+	    pr_err("Responseresponse without done: %s\n", ti->inbuf);
+	} else {
+	    copy_string(sb->response, end, sizeof(sb->response));
+	    sb->got_resp = true;
+	}
     } else {
-	fprintf(stderr, "Unknown response type: %s\n", ti->inbuf);
+	pr_err("Unknown response type: %s\n", ti->inbuf);
     }
 }
 
@@ -475,7 +770,7 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	    return 0;
 
 	if (err) {
-	    fprintf(stderr, "Error from helper: %s\n", gensio_err_to_str(err));
+	    pr_err("Error from helper: %s\n", gensio_err_to_str(err));
 	    ti->rv = 1;
 	    start_test_close(ti);
 	    return 0;
@@ -524,13 +819,14 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 	    struct gensio_link *l = gensio_list_first(&ti->writelist);
 	    struct sendbuf *sb = gensio_container_of(l, struct sendbuf, link);
 
+	    if (debug)
+		printf("Send: '%s'\n", (char *) sb->data);
 	    rv = gensio_write(ti->helper, &i,
 			      sb->data + sb->pos, sb->len - sb->pos,
 			      NULL);
 	    if (rv) {
 		if (rv != GE_REMCLOSE)
-		    fprintf(stderr, "Error writing to io: %s\n",
-			    gensio_err_to_str(rv));
+		    pr_err("Error writing to io: %s\n", gensio_err_to_str(rv));
 		gensio_set_write_callback_enable(ti->helper, false);
 		ti->rv = 1;
 		start_test_close(ti);
@@ -567,7 +863,7 @@ ipmi_con_changed_handler(ipmi_con_t   *con,
 	return;
 
     if (err) {
-	fprintf(stderr, "IPMI connection failure: %x\n", err);
+	pr_err("IPMI connection failure: %x\n", err);
 	ti->icon = NULL;
 	con->close_connection(con);
 	if (ti->ready)
@@ -586,8 +882,7 @@ helper_open_done(struct gensio *io, int err, void *open_data)
 	return;
 
     if (err) {
-	fprintf(stderr, "helper connection failure: %s\n",
-		gensio_err_to_str(err));
+	pr_err("helper connection failure: %s\n", gensio_err_to_str(err));
 	gensio_free(io);
 	ti->helper = NULL;
     }
@@ -739,9 +1034,26 @@ main(int argc, char *argv[])
     struct gensio_os_proc_data *proc_data = NULL;
     int rv, testnum = -1;
     gensio_time timeout;
+    int argp = 1;
 
-    if (argc > 1)
-	testnum = atoi(argv[1]);
+    while (argp < argc && argv[argp][0] == '-') {
+	if (strcmp(argv[argp], "-d") == 0) {
+	    debug++;
+	} else if (strcmp(argv[argp], "-l") == 0) {
+	    unsigned int i;
+
+	    for (i = 0; tests[i].name; i++)
+		printf("%d: %s\n", i, tests[i].name);
+	    return 0;
+	} else {
+	    fprintf(stderr, "Unknown option: %s\n", argv[argp]);
+	    return 1;
+	}
+	argp++;
+    }
+
+    if (argp < argc)
+	testnum = atoi(argv[argp]);
 
     memset(&ti, 0, sizeof(ti));
 

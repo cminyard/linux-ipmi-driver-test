@@ -36,9 +36,9 @@
  *     Unregister for command.
  *   EvEnable <id> <devidx> <enable>
  *     Set event enable (1 or 0 for enable or disable).
- *   Open <id> <devidx> <devidx>
+ *   Open <id> <devidx> <dev>
  *     Open IPMI device.
- *   Close <id> <idx>
+ *   Close <id> <devidx>
  *     Close IPMI device.
  *   Panic <id>
  *     Panic the system to test the panic logs.
@@ -77,6 +77,9 @@
  *   Panic <id>
  *     The system is about to panic.
  *   Runrsp <id> <return code> <output>
+ *     The output of a Runcmd.  Note that the <output> is nil terminated,
+ *     not newline terminated, so some special handling is required.  This
+ *     is so you can have newlines in the output.
  *
  * Note that if the <id> is "-", it means the id couldn't be obtained from
  * the command.

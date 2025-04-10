@@ -95,3 +95,10 @@ Note that my kernel build is in Zx86_64, you need to use the location
 of your kernel build for this.
 
 # Running
+
+# Handy commands
+
+Command to remove all modules:
+
+    rmmod `lsmod | tail -n +2 | awk '{ print $1 }'`
+    echo "Close 0 0" | gensiot -i 'stdio(self)' 'tcp,localhost,2000'
