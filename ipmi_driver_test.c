@@ -14,7 +14,7 @@ static int debug;
 
 struct tinfo;
 
-struct sendbuf {
+struct helperbuf {
     struct gensio_link link;
     struct tinfo *ti;
     gensiods len;
@@ -51,10 +51,10 @@ struct tinfo {
     char inbuf[1024];
     gensiods inbuf_len;
 
-    /* List of struct sendbuf to write. */
+    /* List of struct helperbuf to write. */
     struct gensio_list writelist;
 
-    /* List of struct sendbuf waiting for a response. */
+    /* List of struct helperbuf waiting for a response. */
     struct gensio_list waitlist;
 };
 
@@ -85,11 +85,11 @@ copy_string(char *dst, const char *src, gensiods len)
     return 0;
 }
 
-static struct sendbuf *
-alloc_sendbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
+static struct helperbuf *
+alloc_helperbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
 {
     struct gensio_os_funcs *o = ti->o;
-    struct sendbuf *s;
+    struct helperbuf *s;
     va_list ap2;
     size_t len, len2;
     char dummy[21];
@@ -97,7 +97,7 @@ alloc_sendbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
     va_copy(ap2, ap);
     len = vsnprintf(dummy, 21, str, ap);
     len += snprintf(dummy, 21, "%s %llu ", cmd, ti->curr_id);
-    s = gensio_os_funcs_zalloc(o, sizeof(struct sendbuf) + len + 2);
+    s = gensio_os_funcs_zalloc(o, sizeof(struct helperbuf) + len + 2);
     if (!s)
 	return NULL;
     s->len = len + 1;
@@ -116,27 +116,27 @@ alloc_sendbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
 }
 
 static void
-sendbuf_free(struct sendbuf *sb)
+helperbuf_free(struct helperbuf *sb)
 {
     gensio_os_funcs_zfree(sb->ti->o, sb);
 }
 
 static void
-sendbuf_unlink_free(struct tinfo *ti, struct sendbuf *sb)
+helperbuf_unlink_free(struct tinfo *ti, struct helperbuf *sb)
 {
     if (sb->sent)
 	gensio_list_rm(&ti->waitlist, &sb->link);
     else
 	gensio_list_rm(&ti->writelist, &sb->link);
-    sendbuf_free(sb);
+    helperbuf_free(sb);
 }
 
-static struct sendbuf *
+static struct helperbuf *
 helper_vsend(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
 {
-    struct sendbuf *s;
+    struct helperbuf *s;
 
-    s = alloc_sendbuf(ti, cmd, str, ap);
+    s = alloc_helperbuf(ti, cmd, str, ap);
     gensio_list_add_tail(&ti->writelist, &s->link);
     gensio_set_write_callback_enable(ti->helper, true);
     s->needs_resp = strcmp(cmd, "Command") == 0 || strcmp(cmd, "Response") == 0;
@@ -157,11 +157,11 @@ i_pr_err(const char *file, unsigned int line, char *fmt, ...)
 #define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
 
 __attribute__ ((__format__ (__printf__, 3, 4)))
-static struct sendbuf *
+static struct helperbuf *
 helper_send_cmd(struct tinfo *ti, const char *cmd, const char *str, ...)
 {
     va_list ap;
-    struct sendbuf *s;
+    struct helperbuf *s;
 
     va_start(ap, str);
     s = helper_vsend(ti, cmd, str, ap);
@@ -175,7 +175,7 @@ helper_send_cmd(struct tinfo *ti, const char *cmd, const char *str, ...)
 }
 
 static int
-helper_wait_done(struct sendbuf *sb)
+helper_wait_done(struct helperbuf *sb)
 {
     gensio_time timeout = { 10, 0 };
     int rv;
@@ -199,11 +199,11 @@ helper_wait_done(struct sendbuf *sb)
 }
 
 static void
-helper_wait_done_print_err(int rv, struct sendbuf *sb,
+helper_wait_done_print_err(int rv, struct helperbuf *sb,
 			   const char *cmd, const char *str)
 {
     if (rv > 0) {
-	pr_err("Command %s %s: Error waiting on sendbuf: %s\n",
+	pr_err("Command %s %s: Error waiting on helperbuf: %s\n",
 	       cmd, str, gensio_err_to_str(rv));
     } else if (rv < 0) {
 	pr_err("Command %s %s: Load error response: %s\n",
@@ -213,11 +213,11 @@ helper_wait_done_print_err(int rv, struct sendbuf *sb,
 
 __attribute__ ((__format__ (__printf__, 4, 5)))
 int
-helper_cmd_resp(struct tinfo *ti, struct sendbuf **rsb,
+helper_cmd_resp(struct tinfo *ti, struct helperbuf **rsb,
 		const char *cmd, const char *str, ...)
 {
     va_list ap;
-    struct sendbuf *sb;
+    struct helperbuf *sb;
     int rv;
 
     va_start(ap, str);
@@ -236,7 +236,7 @@ helper_cmd_resp(struct tinfo *ti, struct sendbuf **rsb,
     if (rsb)
 	*rsb = sb;
     else
-	sendbuf_unlink_free(sb->ti, sb);
+	helperbuf_unlink_free(sb->ti, sb);
     return rv;
 }
 
@@ -268,7 +268,7 @@ verify_file_contents(struct tinfo *ti, const char *dir, const char *file,
 		     const char *contents)
 {
     int rv;
-    struct sendbuf *sb;
+    struct helperbuf *sb;
 
     rv = helper_cmd_resp(ti, &sb, "Runcmd", "cat %s/%s", dir, file);
     if (rv)
@@ -282,7 +282,7 @@ verify_file_contents(struct tinfo *ti, const char *dir, const char *file,
 	       dir, file, contents, sb->response);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
     return 0;
 }
 
@@ -290,7 +290,7 @@ static int
 test_bmcs(struct tinfo *ti)
 {
     int rv;
-    struct sendbuf *sb;
+    struct helperbuf *sb;
     char *t, *saveptr;
     bool found = false, found2 = false;
 
@@ -303,7 +303,7 @@ test_bmcs(struct tinfo *ti)
 	return rv;
     if (sb->rc) {
 	pr_err("Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
-	sendbuf_unlink_free(ti, sb);
+	helperbuf_unlink_free(ti, sb);
 	return 1;
     }
 
@@ -324,7 +324,7 @@ test_bmcs(struct tinfo *ti)
 	return 1;
     }
 
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_si");
     if (rv)
@@ -335,7 +335,7 @@ test_bmcs(struct tinfo *ti)
 	return rv;
     if (sb->rc) {
 	pr_err("Dump BMCs 1 failed (%d): %s\n", sb->rc, sb->response);
-	sendbuf_unlink_free(ti, sb);
+	helperbuf_unlink_free(ti, sb);
 	return 1;
     }
 
@@ -362,7 +362,7 @@ test_bmcs(struct tinfo *ti)
 	pr_err("ipmi_bmc.1 not found on system: %s\n", t);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     /* Verify ipmisim fields, must match ipmisim1.emu. */
     if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
@@ -426,7 +426,7 @@ test_bmcs(struct tinfo *ti)
 	return rv;
     if (sb->rc) {
 	pr_err("Dump BMCs 2 failed (%d): %s\n", sb->rc, sb->response);
-	sendbuf_unlink_free(ti, sb);
+	helperbuf_unlink_free(ti, sb);
 	return 1;
     }
 
@@ -438,7 +438,7 @@ test_bmcs(struct tinfo *ti)
 	}
 	t = strtok_r(NULL, "\n", &saveptr);
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     return 0;
 }
@@ -447,7 +447,7 @@ static int
 test_cmd(struct tinfo *ti)
 {
     int rv;
-    struct sendbuf *sb, *sb2, *sb3, *sb4;
+    struct helperbuf *sb, *sb2, *sb3, *sb4;
     static char *bmc0_getdevid_rsp =
 	" 0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
     static char *mc30_getdevid_rsp =
@@ -471,10 +471,10 @@ test_cmd(struct tinfo *ti)
     if (strcmp(sb->response, bmc0_getdevid_rsp) != 0) {
 	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
 	       bmc0_getdevid_rsp, sb->response);
-	sendbuf_unlink_free(ti, sb);
+	helperbuf_unlink_free(ti, sb);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     rv = helper_cmd_resp(ti, &sb, "Command", "0 ipmb 0 30 0 6 1");
     if (rv)
@@ -482,10 +482,10 @@ test_cmd(struct tinfo *ti)
     if (strcmp(sb->response, mc30_getdevid_rsp) != 0) {
 	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
 	       bmc0_getdevid_rsp, sb->response);
-	sendbuf_unlink_free(ti, sb);
+	helperbuf_unlink_free(ti, sb);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     /* Send a number of commands and wait for all the responses. */
     sb = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
@@ -532,10 +532,10 @@ test_cmd(struct tinfo *ti)
 	       bmc0_getdevid_rsp, sb->response);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb4);
-    sendbuf_unlink_free(ti, sb3);
-    sendbuf_unlink_free(ti, sb2);
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb4);
+    helperbuf_unlink_free(ti, sb3);
+    helperbuf_unlink_free(ti, sb2);
+    helperbuf_unlink_free(ti, sb);
 
     /* Send a command and close. */
     sb3 = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
@@ -563,7 +563,7 @@ test_cmd(struct tinfo *ti)
 	if (count > 10)
 	    break;
 	if (rv) {
-	    sendbuf_unlink_free(ti, sb);
+	    helperbuf_unlink_free(ti, sb);
 	    sleep(1);
 	    sb = helper_send_cmd(ti, "Unload", "%s", module);
 	    if (!sb)
@@ -574,7 +574,7 @@ test_cmd(struct tinfo *ti)
 	helper_wait_done_print_err(rv, sb, "Unload", module);
 	return 1;
     }
-    sendbuf_unlink_free(ti, sb);
+    helperbuf_unlink_free(ti, sb);
 
     if (restart_count == 0) {
 	restart_count++;
@@ -664,8 +664,8 @@ ipmi_event_handler(ipmi_con_t        *ipmi,
     printf("\n");
 }
 
-static struct sendbuf *
-find_waiting_sendbuf(struct tinfo *ti, char **idptr)
+static struct helperbuf *
+find_waiting_helperbuf(struct tinfo *ti, char **idptr)
 {
     unsigned long long id;
     char *idstr = *idptr;
@@ -673,7 +673,7 @@ find_waiting_sendbuf(struct tinfo *ti, char **idptr)
 
     id = strtoull(idstr, idptr, 0);
     gensio_list_for_each(&ti->waitlist, l) {
-	struct sendbuf *sb = gensio_container_of(l, struct sendbuf, link);
+	struct helperbuf *sb = gensio_container_of(l, struct helperbuf, link);
 
 	if (sb->id == id) {
 	    return sb;
@@ -686,7 +686,7 @@ static void
 handle_buf(struct tinfo *ti)
 {
     char *end;
-    struct sendbuf *sb;
+    struct helperbuf *sb;
 
     if (debug)
 	printf("Recv: '%s'\n", ti->inbuf);
@@ -694,11 +694,11 @@ handle_buf(struct tinfo *ti)
 	/* Just ignore this. */
     } else if (strncmp(ti->inbuf, "Done ", 5) == 0) {
 	end = ti->inbuf + 5;
-	sb = find_waiting_sendbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, &end);
 	if (!sb) {
 	    pr_err("Unknown done: %s\n", ti->inbuf);
 	} else if (!sb->needs_resp && sb->free_after_send) {
-	    sendbuf_unlink_free(ti, sb);
+	    helperbuf_unlink_free(ti, sb);
 	} else {
 	    if (*end == ' ') {
 		/* Got an error. */
@@ -710,7 +710,7 @@ handle_buf(struct tinfo *ti)
 	}
     } else if (strncmp(ti->inbuf, "Runrsp ", 7) == 0) {
 	end = ti->inbuf + 7;
-	sb = find_waiting_sendbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, &end);
 	if (!sb) {
 	    pr_err("Unknown Runrsp: %s\n", ti->inbuf);
 	} else {
@@ -725,11 +725,11 @@ handle_buf(struct tinfo *ti)
 	}
     } else if (strncmp(ti->inbuf, "Response ", 9) == 0) {
 	end = ti->inbuf + 9;
-	sb = find_waiting_sendbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, &end);
 	if (!sb) {
 	    pr_err("Unknown response: %s\n", ti->inbuf);
 	} else if (sb->free_after_send) {
-	    sendbuf_unlink_free(ti, sb);
+	    helperbuf_unlink_free(ti, sb);
 	} else if (!sb->done) {
 	    pr_err("Response without done: %s\n", ti->inbuf);
 	} else {
@@ -738,7 +738,7 @@ handle_buf(struct tinfo *ti)
 	}
     } else if (strncmp(ti->inbuf, "ResponseResponse ", 17) == 0) {
 	end = ti->inbuf + 17;
-	sb = find_waiting_sendbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, &end);
 	if (!sb) {
 	    pr_err("Unknown responseresponse: %s\n", ti->inbuf);
 	} else if (!sb->done) {
@@ -817,7 +817,8 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 
 	while (!gensio_list_empty(&ti->writelist)) {
 	    struct gensio_link *l = gensio_list_first(&ti->writelist);
-	    struct sendbuf *sb = gensio_container_of(l, struct sendbuf, link);
+	    struct helperbuf *sb = gensio_container_of(l, struct helperbuf,
+						       link);
 
 	    if (debug)
 		printf("Send: '%s'\n", (char *) sb->data);
