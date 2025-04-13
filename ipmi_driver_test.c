@@ -8,6 +8,7 @@
 #include <gensio/gensio_list.h>
 #include <OpenIPMI/ipmiif.h>
 #include <OpenIPMI/ipmi_conn.h>
+#include <OpenIPMI/ipmi_err.h>
 #include <OpenIPMI/internal/ipmi_event.h>
 
 static int debug;
@@ -29,6 +30,14 @@ struct helperbuf {
     int rc;
 
     char response[512];
+};
+
+struct ipmibuf {
+    struct gensio_link link;
+    struct tinfo *ti;
+    ipmi_msgi_t *msgi;
+    bool done;
+    bool free_on_done;
 };
 
 struct tinfo {
@@ -69,6 +78,11 @@ do_vlog(struct gensio_os_funcs *f, enum gensio_log_levels level,
     fprintf(stderr, "\n");
 }
 
+/*
+ * Why couldn't the C designers have a function that would copy a
+ * string, truncate when it was too big for the destination and return
+ * if it truncated?
+ */
 static int
 copy_string(char *dst, const char *src, gensiods len)
 {
@@ -82,6 +96,150 @@ copy_string(char *dst, const char *src, gensiods len)
     dst[i] = '\0';
     if (src[i])
 	return GE_TOOBIG;
+    return 0;
+}
+
+static void
+i_pr_err(const char *file, unsigned int line, char *fmt, ...)
+{
+    va_list ap;
+
+    fprintf(stderr, "%s Line %u: ", file, line);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+#define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
+
+static struct ipmibuf *
+alloc_ipmibuf(struct tinfo *ti)
+{
+    struct gensio_os_funcs *o = ti->o;
+    struct ipmibuf *ib;
+
+    ib = gensio_os_funcs_zalloc(o, sizeof(*ib));
+    if (!ib)
+	return NULL;
+
+    ib->msgi = ipmi_alloc_msg_item();
+    if (!ib->msgi) {
+	gensio_os_funcs_zfree(o, ib);
+	return NULL;
+    }
+
+    ib->msgi->data1 = ib;
+    ib->ti = ti;
+    return ib;
+}
+
+static void
+free_ipmibuf(struct ipmibuf *ib)
+{
+    ipmi_free_msg_item(ib->msgi);
+    gensio_os_funcs_zfree(ib->ti->o, ib);
+}
+
+static int
+ipmi_rsp_handler(ipmi_con_t *icon, ipmi_msgi_t *rspi)
+{
+    struct ipmibuf *ib = rspi->data1;
+
+    if (ib->free_on_done)
+	free_ipmibuf(ib);
+    else
+	ib->done = true;
+    return IPMI_MSG_ITEM_USED;
+}
+
+static int
+send_ipmi_msg(struct tinfo *ti, ipmi_addr_t *addr, unsigned int addrlen,
+	      uint8_t netfn, uint8_t cmd, uint8_t *data, unsigned int datalen,
+	      struct ipmibuf **rib)
+{
+    struct ipmibuf *ib;
+    ipmi_msg_t msg;
+    int rv;
+
+    ib = alloc_ipmibuf(ti);
+    if (!ib)
+	return GE_NOMEM;
+
+    msg.netfn = netfn;
+    msg.cmd = cmd;
+    msg.data = data;
+    msg.data_len = datalen;
+
+    rv = ti->icon->send_command(ti->icon, addr, addrlen, &msg,
+				ipmi_rsp_handler, ib->msgi);
+    if (rv) {
+	if (IPMI_IS_OS_ERR(rv))
+	    rv = gensio_os_err_to_err(ti->o, IPMI_OS_ERR_VAL(rv));
+	else
+	    rv = GE_COMMERR;
+	gensio_os_funcs_zfree(ti->o, ib);
+	return rv;
+    }
+
+    *rib = ib;
+    return 0;
+}
+
+static int
+ipmi_wait_done(struct ipmibuf *ib)
+{
+    /* IPMI commands are supposed to always give responses.  Just in case... */
+    gensio_time timeout = { 60, 0 };
+    int rv;
+
+    while (!ib->done && !ib->ti->rv) {
+	rv = gensio_os_funcs_service(ib->ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED)
+	    return rv;
+    }
+    if (ib->ti->rv)
+	return ib->ti->rv;
+    return 0;
+}
+
+static int
+ipmi_cmd_resp(struct tinfo *ti, ipmi_addr_t *addr, unsigned int addrlen,
+	      uint8_t netfn, uint8_t cmd, uint8_t *data, unsigned int datalen,
+	      struct ipmibuf **rib)
+{
+    struct ipmibuf *ib;
+    int rv;
+
+    rv = send_ipmi_msg(ti, addr, addrlen, netfn, cmd, data, datalen, &ib);
+    if (rv) {
+	pr_err("Unable to send IPMI message (%x %x): %s\n", netfn, cmd,
+	       gensio_err_to_str(rv));
+	return rv;
+    }
+    rv = ipmi_wait_done(ib);
+    if (rv) {
+	/* Don't free the buffer, but mark it to be freed on response. */
+	pr_err("Failed waiting on IPMI message (%x %x): %s\n", netfn, cmd,
+	       gensio_err_to_str(rv));
+	ib->free_on_done = true;
+	return rv;
+    }
+
+    /* Got a response. */
+
+    if (ib->msgi->msg.data_len < 1) {
+	pr_err("IPMI message rsp (%x %x) had no data.\n", netfn, cmd);
+	free_ipmibuf(ib);
+	return GE_INVAL;
+    }
+
+    if (ib->msgi->msg.data[0]) {
+	pr_err("IPMI message rsp (%x %x) had error 0x%x.\n", netfn, cmd,
+	       ib->msgi->msg.data[0]);
+	free_ipmibuf(ib);
+	return GE_INVAL;
+    }
+
+    *rib = ib;
     return 0;
 }
 
@@ -144,18 +302,6 @@ helper_vsend(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
     return s;
 }
 
-static void
-i_pr_err(const char *file, unsigned int line, char *fmt, ...)
-{
-    va_list ap;
-
-    fprintf(stderr, "%s Line %u: ", file, line);
-    va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
-    va_end(ap);
-}
-#define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
-
 __attribute__ ((__format__ (__printf__, 3, 4)))
 static struct helperbuf *
 helper_send_cmd(struct tinfo *ti, const char *cmd, const char *str, ...)
@@ -193,6 +339,8 @@ helper_wait_done(struct helperbuf *sb)
 		return rv;
 	}
     }
+    if (sb->ti->rv)
+	return sb->ti->rv;
     if (!sb->got_resp && sb->response[0])
 	return -1;
     return 0;
@@ -593,6 +741,35 @@ test_cmd(struct tinfo *ti)
     return 0;
 }
 
+static int
+test_ipmilan_cmd(struct tinfo *ti)
+{
+    struct ipmibuf *ib;
+    int rv;
+    struct ipmi_system_interface_addr si;
+    struct ipmi_ipmb_addr ipmb;
+
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0, &ib);
+    if (rv)
+	return rv;
+    free_ipmibuf(ib);
+
+    ipmb.addr_type = IPMI_IPMB_ADDR_TYPE;
+    ipmb.channel = 0;
+    ipmb.lun = 0;
+    ipmb.slave_addr = 0x30; /* Simulated satellite BMC. */
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &ipmb, sizeof(ipmb),
+		       6, 1, NULL, 0, &ib);
+    if (rv)
+	return rv;
+    free_ipmibuf(ib);
+
+    return 0;
+}
+
 struct teststr {
     char *name;
     int (*testfn)(struct tinfo *ti);
@@ -600,6 +777,7 @@ struct teststr {
     { "Test loading and unloading modules", test_load_unload },
     { "Test BMC creation and removal", test_bmcs },
     { "Test basic commands", test_cmd },
+    { "Test basic IPMI LAN commands", test_ipmilan_cmd },
     {}
 };
 
@@ -751,8 +929,6 @@ handle_buf(struct tinfo *ti)
 	pr_err("Unknown response type: %s\n", ti->inbuf);
     }
 }
-
-#include <ctype.h>
 
 static int
 io_event(struct gensio *io, void *user_data, int event, int err,
