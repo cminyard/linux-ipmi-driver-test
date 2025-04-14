@@ -61,7 +61,7 @@
  *   Done <id> [<err>]
  *     Command with the given id has completed.  If <err> is present, there
  *     was an error.
- *   Command <cid> <devidx> err <errstr> | <addr> <netfn> <cmd> <data>
+ *   Command <cid> <devidx> <addr> <netfn> <cmd> <data>
  *     A command from the BMC to handle.  Return the <cid> as <cid> in
  *     the Response.
  *   Event <devidx> <data>
@@ -84,7 +84,7 @@
  * Note that if the <id> is "-", it means the id couldn't be obtained from
  * the command.
  *
- * Note that <id>, <return code. <dev> and <devidx> are decimal
+ * Note that <id>, <return code>, <dev>, <cid> and <devidx> are decimal
  * numbers.  All other values are hexadecimal.
  *
  * With the lan.conf set up as it is now, there are 3 IPMI devices.

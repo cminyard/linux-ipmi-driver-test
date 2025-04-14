@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <gensio/gensio.h>
 #include <gensio/gensio_openipmi_oshandler.h>
 #include <gensio/gensio_list.h>
@@ -15,6 +16,9 @@ static int debug;
 
 struct tinfo;
 
+/*
+ * Messages to and from the helper app are handled with this structure.
+ */
 struct helperbuf {
     struct gensio_link link;
     struct tinfo *ti;
@@ -32,12 +36,29 @@ struct helperbuf {
     char response[512];
 };
 
+/*
+ * Message to and from ipmi_sim are handled here.
+ */
 struct ipmibuf {
     struct gensio_link link;
     struct tinfo *ti;
     ipmi_msgi_t *msgi;
     bool done;
     bool free_on_done;
+};
+
+/*
+ * Commands sent by the helper to here are handled through this.
+ */
+struct cmdwaiter {
+    struct gensio_link link;
+    struct tinfo *ti;
+    struct helperbuf *sb;
+    /* Returns true if the command was handled, false if not. */
+    int (*handler)(struct cmdwaiter *cw, long long cid, unsigned int devidx,
+		   const char *addr, uint8_t netfn, uint8_t cmd,
+		   const char *data);
+    bool done;
 };
 
 struct tinfo {
@@ -65,6 +86,9 @@ struct tinfo {
 
     /* List of struct helperbuf waiting for a response. */
     struct gensio_list waitlist;
+
+    /* List of struct cmdwaiter waiting for a command from the helper. */
+    struct gensio_list cmdwaitlist;
 };
 
 static void start_test_close(struct tinfo *ti);
@@ -110,6 +134,156 @@ i_pr_err(const char *file, unsigned int line, char *fmt, ...)
     va_end(ap);
 }
 #define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
+
+static int
+get_uint(char *name, char **str, bool allow_end, unsigned int *rval)
+{
+    char *end, *s = *str;
+    int val;
+
+    if (!isdigit(s[0])) {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    val = strtoul(s, &end, 0);
+    if (*end == ' ') {
+	end++;
+    } else if (!allow_end || *end != '\0') {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    *str = end;
+    *rval = val;
+    return 0;
+}
+
+static int
+get_long_long(char *name, char **str, bool allow_end, long long *rval)
+{
+    char *end, *s = *str;
+    int val;
+
+    if (!isdigit(s[0])) {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    val = strtoll(s, &end, 0);
+    if (*end == ' ') {
+	end++;
+    } else if (!allow_end || *end != '\0') {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    *str = end;
+    *rval = val;
+    return 0;
+}
+
+static int
+get_ulong_long(char *name, char **str, bool allow_end, unsigned long long *rval)
+{
+    char *end, *s = *str;
+    int val;
+
+    if (!isdigit(s[0])) {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    val = strtoull(s, &end, 0);
+    if (*end == ' ') {
+	end++;
+    } else if (!allow_end || *end != '\0') {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    *str = end;
+    *rval = val;
+    return 0;
+}
+
+static int
+get_hex_byte(char *name, char **str, bool allow_end, uint8_t *rval)
+{
+    char *end, *s = *str;
+    int val;
+
+    if (!isxdigit(s[0])) {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    val = strtoul(s, &end, 16);
+    if (*end == ' ') {
+	end++;
+    } else if (!allow_end || *end != '\0' || val > 255) {
+	pr_err("Invalid number %s in %s\n", s, name);
+	return 1;
+    }
+
+    *str = end;
+    *rval = val;
+    return 0;
+}
+
+static char *
+get_addr(char *name, char **str, bool allow_end)
+{
+    char *s = *str, *rv;
+    int skip, mode;
+
+    if (strncmp(s, "si ", 3) == 0) {
+	skip = 2;
+	s += 3;
+    } else if (strncmp(s, "ipmb ", 5) == 0) {
+	skip = 3;
+	s += 5;
+    } else if (strncmp(s, "lan ", 4) == 0) {
+	skip = 6;
+	s += 4;
+    } else {
+	pr_err("Invalid address %s in %s\n", *str, name);
+	return NULL;
+    }
+    for (mode = 0; skip > 0; s++) {
+	if (!*s) {
+	    pr_err("Invalid address %s in %s\n", *str, name);
+	    return NULL;
+	}
+	if (mode == 0) {
+	    if (!isxdigit(*s)) {
+		pr_err("Invalid address %s in %s\n", *str, name);
+		return NULL;
+	    }
+	    mode = 1;
+	} else if (mode == 1) {
+	    if (isxdigit(*s)) {
+		/* It's what we want. */
+	    } else if (*s == ' ' || *s == '\0') {
+		skip--;
+		mode = 0;
+	    } else {
+		pr_err("Invalid address %s in %s\n", *str, name);
+		return NULL;
+	    }
+	}
+    }
+    rv = *str;
+    if (*s) {
+	*s = '\0';
+	*str = s + 1;
+    } else if (!allow_end) {
+	pr_err("Invalid address %s in %s\n", *str, name);
+	return NULL;
+    }
+
+    return rv;
+}
 
 static struct ipmibuf *
 alloc_ipmibuf(struct tinfo *ti)
@@ -204,7 +378,7 @@ ipmi_wait_done(struct ipmibuf *ib)
 static int
 ipmi_cmd_resp(struct tinfo *ti, ipmi_addr_t *addr, unsigned int addrlen,
 	      uint8_t netfn, uint8_t cmd, uint8_t *data, unsigned int datalen,
-	      struct ipmibuf **rib)
+	      bool allow_cmd_fail, struct ipmibuf **rib)
 {
     struct ipmibuf *ib;
     int rv;
@@ -232,7 +406,7 @@ ipmi_cmd_resp(struct tinfo *ti, ipmi_addr_t *addr, unsigned int addrlen,
 	return GE_INVAL;
     }
 
-    if (ib->msgi->msg.data[0]) {
+    if (!allow_cmd_fail && ib->msgi->msg.data[0]) {
 	pr_err("IPMI message rsp (%x %x) had error 0x%x.\n", netfn, cmd,
 	       ib->msgi->msg.data[0]);
 	free_ipmibuf(ib);
@@ -597,9 +771,9 @@ test_cmd(struct tinfo *ti)
     int rv;
     struct helperbuf *sb, *sb2, *sb3, *sb4;
     static char *bmc0_getdevid_rsp =
-	" 0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
+	"0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
     static char *mc30_getdevid_rsp =
-	" 0 ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00";
+	"0 ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00";
     unsigned int count;
     unsigned int restart_count = 0;
     const char *module = "ipmi_ssif";
@@ -752,7 +926,8 @@ test_ipmilan_cmd(struct tinfo *ti)
     si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
     si.channel = 0xf;
     si.lun = 0;
-    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0, &ib);
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0,
+		       false, &ib);
     if (rv)
 	return rv;
     free_ipmibuf(ib);
@@ -762,12 +937,124 @@ test_ipmilan_cmd(struct tinfo *ti)
     ipmb.lun = 0;
     ipmb.slave_addr = 0x30; /* Simulated satellite BMC. */
     rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &ipmb, sizeof(ipmb),
-		       6, 1, NULL, 0, &ib);
+		       6, 1, NULL, 0, false, &ib);
     if (rv)
 	return rv;
     free_ipmibuf(ib);
 
     return 0;
+}
+
+static int
+cmd_handler(struct cmdwaiter *cw, long long cid, unsigned int devidx,
+	    const char *addr, uint8_t netfn, uint8_t cmd,
+	    const char *data)
+{
+    struct tinfo *ti = cw->ti;
+
+    if (devidx != 0 || netfn != 6 || cmd != 1)
+	return 0;
+
+    cw->sb = helper_send_cmd(ti, "Response", "%u %lld %s 7 1 1 2 3 4",
+			     devidx, cid, addr);
+    if (!cw->sb) {
+	printf("Out of memory sending response\n");
+	return 1;
+    }
+    cw->done = true;
+    gensio_list_rm(&ti->cmdwaitlist, &cw->link);
+    return 1;
+}
+
+static int
+test_host_cmd(struct tinfo *ti)
+{
+    struct ipmibuf *ib = NULL;
+    int rv;
+    struct ipmi_system_interface_addr si;
+    struct cmdwaiter cw;
+    gensio_time timeout;
+
+    memset(&cw, 0, sizeof(cw));
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    /* Send the command, no handler. */
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 2;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0,
+		       true, &ib);
+    if (rv)
+	goto out_err;
+    if (ib->msgi->msg.data[0] != 0xc1) {
+	pr_err("Did not get C1 error from unhandled command, got %2.2x\n",
+	       ib->msgi->msg.data[0]);
+	rv = 1;
+	goto out_err;
+    }
+    free_ipmibuf(ib);
+    ib = NULL;
+
+    /* Set up a handler to receive the command. */
+    cw.ti = ti;
+    cw.handler = cmd_handler;
+    gensio_list_add_tail(&ti->cmdwaitlist, &cw.link);
+
+    /* Register for the command. */
+    rv = helper_cmd_resp(ti, NULL, "Register", "0 6 1");
+    if (rv)
+	goto out_err;
+
+    rv = send_ipmi_msg(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0, &ib);
+    if (rv)
+	goto out_err;
+
+    timeout.secs = 10;
+    timeout.nsecs = 0;
+    while (!ti->rv && !cw.done) {
+	rv = gensio_os_funcs_service(ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED) {
+	    pr_err("Error waiting on received command: %s\n",
+		   gensio_err_to_str(rv));
+	    goto out_err;
+	}
+    }
+
+    rv = helper_wait_done(cw.sb);
+    if (rv)
+	helper_wait_done_print_err(rv, cw.sb, "Response", "");
+
+    rv = ipmi_wait_done(ib);
+    if (rv) {
+	/* Don't free the buffer, but mark it to be freed on response. */
+	pr_err("Failed to get host command respone\n", gensio_err_to_str(rv));
+	ib->free_on_done = true;
+	ib = NULL;
+	return rv;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_si ipmi_msghandler");
+    if (rv)
+	return rv;
+
+ out_err:
+    if (ib)
+	free_ipmibuf(ib);
+    if (cw.sb)
+	helperbuf_free(cw.sb);
+    return rv;
 }
 
 struct teststr {
@@ -778,6 +1065,7 @@ struct teststr {
     { "Test BMC creation and removal", test_bmcs },
     { "Test basic commands", test_cmd },
     { "Test basic IPMI LAN commands", test_ipmilan_cmd },
+    { "Test commands to host", test_host_cmd },
     {}
 };
 
@@ -843,13 +1131,13 @@ ipmi_event_handler(ipmi_con_t        *ipmi,
 }
 
 static struct helperbuf *
-find_waiting_helperbuf(struct tinfo *ti, char **idptr)
+find_waiting_helperbuf(struct tinfo *ti, bool allow_end, char **idptr)
 {
     unsigned long long id;
-    char *idstr = *idptr;
     struct gensio_link *l;
 
-    id = strtoull(idstr, idptr, 0);
+    if (get_ulong_long("Helper id", idptr, allow_end, &id))
+	return NULL;
     gensio_list_for_each(&ti->waitlist, l) {
 	struct helperbuf *sb = gensio_container_of(l, struct helperbuf, link);
 
@@ -872,7 +1160,7 @@ handle_buf(struct tinfo *ti)
 	/* Just ignore this. */
     } else if (strncmp(ti->inbuf, "Done ", 5) == 0) {
 	end = ti->inbuf + 5;
-	sb = find_waiting_helperbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, true, &end);
 	if (!sb) {
 	    pr_err("Unknown done: %s\n", ti->inbuf);
 	} else if (!sb->needs_resp && sb->free_after_send) {
@@ -888,7 +1176,7 @@ handle_buf(struct tinfo *ti)
 	}
     } else if (strncmp(ti->inbuf, "Runrsp ", 7) == 0) {
 	end = ti->inbuf + 7;
-	sb = find_waiting_helperbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, false, &end);
 	if (!sb) {
 	    pr_err("Unknown Runrsp: %s\n", ti->inbuf);
 	} else {
@@ -903,7 +1191,7 @@ handle_buf(struct tinfo *ti)
 	}
     } else if (strncmp(ti->inbuf, "Response ", 9) == 0) {
 	end = ti->inbuf + 9;
-	sb = find_waiting_helperbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, false, &end);
 	if (!sb) {
 	    pr_err("Unknown response: %s\n", ti->inbuf);
 	} else if (sb->free_after_send) {
@@ -914,9 +1202,39 @@ handle_buf(struct tinfo *ti)
 	    copy_string(sb->response, end, sizeof(sb->response));
 	    sb->got_resp = true;
 	}
+    } else if (strncmp(ti->inbuf, "Command ", 8) == 0) {
+	long long cid;
+	unsigned int devidx;
+	char *end = ti->inbuf + 8;
+	char *addr;
+	uint8_t netfn, cmd;
+	struct gensio_link *l;
+	bool handled = false;
+
+	if (get_long_long(ti->inbuf, &end, false, &cid))
+	    return;
+	if (get_uint(ti->inbuf, &end, false, &devidx))
+	    return;
+	addr = get_addr(ti->inbuf, &end, false);
+	if (!addr)
+	    return;
+	if (get_hex_byte(ti->inbuf, &end, false, &netfn))
+	    return;
+	if (get_hex_byte(ti->inbuf, &end, true, &cmd))
+	    return;
+	gensio_list_for_each(&ti->cmdwaitlist, l) {
+	    struct cmdwaiter *cw = gensio_container_of(l, struct cmdwaiter,
+						       link);
+	    if (cw->handler(cw, cid, devidx, addr, netfn, cmd, end)) {
+		handled = true;
+		break;
+	    }
+	}
+	if (!handled)
+	    pr_err("Unhandled command: %s\n", ti->inbuf);
     } else if (strncmp(ti->inbuf, "ResponseResponse ", 17) == 0) {
 	end = ti->inbuf + 17;
-	sb = find_waiting_helperbuf(ti, &end);
+	sb = find_waiting_helperbuf(ti, false, &end);
 	if (!sb) {
 	    pr_err("Unknown responseresponse: %s\n", ti->inbuf);
 	} else if (!sb->done) {
@@ -1236,6 +1554,7 @@ main(int argc, char *argv[])
 
     gensio_list_init(&ti.writelist);
     gensio_list_init(&ti.waitlist);
+    gensio_list_init(&ti.cmdwaitlist);
 
     rv = gensio_alloc_os_funcs(GENSIO_DEF_WAKE_SIG, &ti.o, 0);
     if (rv) {
