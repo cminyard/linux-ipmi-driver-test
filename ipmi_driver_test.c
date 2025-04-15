@@ -84,6 +84,9 @@ struct tinfo {
 
     struct gensio_waiter *waiter;
 
+    /* A waiter that is never woken, just use for sleeping. */
+    struct gensio_waiter *sleeper;
+
     bool ready;
     bool closing;
     bool ipmi_open;
@@ -511,7 +514,7 @@ helper_send_cmd(struct tinfo *ti, const char *cmd, const char *str, ...)
 static int
 helper_wait_done(struct helperbuf *sb)
 {
-    gensio_time timeout = { 10, 0 };
+    gensio_time timeout = { 30, 0 };
     int rv;
 
     if (sb->needs_resp) {
@@ -629,10 +632,14 @@ test_bmcs(struct tinfo *ti)
     struct helperbuf *sb;
     char *t, *saveptr;
     bool found = false, found2 = false;
+    gensio_time timeout = { 2, 0 };
 
     rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_ssif");
     if (rv)
 	return rv;
+
+    /* Give a little time for the driver to create everything. */
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     rv = helper_cmd_resp(ti, &sb, "Runcmd", "ls /sys/bus/platform/devices");
     if (rv)
@@ -791,12 +798,18 @@ test_cmd(struct tinfo *ti)
     unsigned int count;
     unsigned int restart_count = 0;
     const char *module = "ipmi_ssif";
+    gensio_time timeout;
 
     rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_ssif");
     if (rv)
 	return rv;
 
  restart:
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
 	return rv;
@@ -995,6 +1008,11 @@ test_host_cmd(struct tinfo *ti)
     if (rv)
 	return rv;
 
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
 	return rv;
@@ -1089,17 +1107,10 @@ test_panic_events(struct tinfo *ti)
     struct ipmibuf *ib;
     struct ipmi_system_interface_addr si;
     gensio_time timeout = { 2, 0 };
-    struct gensio_waiter *waiter;
     uint8_t clr_sel_cmddata[6] = { 0x00, 0x00, 'C', 'L', 'R', 0xaa };
     uint8_t get_sel_cmddata[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0xff };
     uint8_t chassis_reset_cmddata[1] = { 0x3 };
     unsigned int i;
-
-    waiter = gensio_os_funcs_alloc_waiter(ti->o);
-    if (!waiter) {
-	pr_err("Error allocating waiter: %s", "No Memory");
-	return 1;
-    }
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
     if (rv)
@@ -1128,7 +1139,7 @@ test_panic_events(struct tinfo *ti)
     }
 
     /* Make sure the events have to to get into the event queue. */
-    gensio_os_funcs_wait(ti->o, waiter, 1, &timeout);
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     /* Fetch the events. */
     for (i = 0; ; i++) {
@@ -1201,7 +1212,7 @@ test_panic_events(struct tinfo *ti)
     /* Wait for the reset to complete. */
     timeout.secs = 10;
     timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, waiter, 1, &timeout);
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     rv = gensio_open_s(ti->helper);
     if (rv) {
@@ -1211,8 +1222,6 @@ test_panic_events(struct tinfo *ti)
     gensio_set_read_callback_enable(ti->helper, true);
 
  out_err:
-    gensio_os_funcs_free_waiter(ti->o, waiter);
-
     return rv;
 }
 
@@ -1708,7 +1717,6 @@ main(int argc, char *argv[])
     int argp = 1;
     uint8_t chassis_on_cmddata[1] = { 0x1 };
     struct ipmi_system_interface_addr si;
-    struct gensio_waiter *tmpwaiter = NULL;
 
     while (argp < argc && argv[argp][0] == '-') {
 	if (strcmp(argv[argp], "-d") == 0) {
@@ -1758,9 +1766,9 @@ main(int argc, char *argv[])
 	goto out_close;
     }
 
-    tmpwaiter = gensio_os_funcs_alloc_waiter(ti.o);
-    if (!tmpwaiter) {
-	fprintf(stderr, "Could not allocate waiter, out of memory\n");
+    ti.sleeper = gensio_os_funcs_alloc_waiter(ti.o);
+    if (!ti.sleeper) {
+	fprintf(stderr, "Could not allocate sleeper, out of memory\n");
 	ti.rv = 1;
 	goto out_close;
     }
@@ -1801,7 +1809,7 @@ main(int argc, char *argv[])
 	/* Wait for power up to complete. */
 	timeout.secs = 10;
 	timeout.nsecs = 0;
-	gensio_os_funcs_wait(ti.o, tmpwaiter, 1, &timeout);
+	gensio_os_funcs_wait(ti.o, ti.sleeper, 1, &timeout);
 	printf(" done\n");
     }
 
@@ -1827,7 +1835,7 @@ main(int argc, char *argv[])
 
     run_tests(&ti, testnum);
 
-    if (testnum == -1) {
+    if (testnum == -1 && !ti.rv) {
 	struct helperbuf *sb;
 
 	printf("Powering off the virtual machine\n");
@@ -1838,7 +1846,7 @@ main(int argc, char *argv[])
 	}
 	timeout.secs = 2;
 	timeout.nsecs = 0;
-	gensio_os_funcs_wait(ti.o, tmpwaiter, 1, &timeout);
+	gensio_os_funcs_wait(ti.o, ti.sleeper, 1, &timeout);
 	helperbuf_unlink_free(sb->ti, sb);
     }
 
@@ -1853,10 +1861,10 @@ main(int argc, char *argv[])
     }
 
  out_close:
-    if (tmpwaiter)
-	gensio_os_funcs_free_waiter(ti.o, tmpwaiter);
     if (ti.waiter)
 	gensio_os_funcs_free_waiter(ti.o, ti.waiter);
+    if (ti.sleeper)
+	gensio_os_funcs_free_waiter(ti.o, ti.sleeper);
     if (proc_data)
 	gensio_os_proc_cleanup(proc_data);
     gensio_os_funcs_free(ti.o);
