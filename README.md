@@ -86,6 +86,18 @@ The virtual machine will have the following ports available:
   
 * 2000 - The IPMI test helper connection.
 
+You can power the VM on with:
+
+    ipmitool -U ipmiusr -P test -I lanplus -H localhost -p 9001 chassis power on
+	
+Or you can use ipmicmd:
+
+    openipmicmd -k 'f 0 6 1' lan -U ipmiusr -P test -p 9001 localhost
+	
+You can connect to the console with:
+
+    solterm lan -U ipmiusr -P test -p 9001 localhost
+
 After this, transfer the modules to the target:
 
     scp -P 5556 Zx86_64/drivers/char/ipmi/*.ko \
@@ -96,9 +108,34 @@ of your kernel build for this.
 
 # Running
 
+After that, compile with:
+
+    gcc -o ipmi_driver_test -g -Wall ipmi_driver_test.c -lgensio -lgensioosh \
+	-l OpenIPMI -l gensio_openipmi_oshandler
+
+Then run it:
+
+    ./ipmi_driver_test
+	
+Note that the test will power on and off the VM.
+
+To list all the tests, do:
+
+    ./ipmi_driver_test -l
+
+And to run an individual test, do:
+
+    ./ipmi_driver_test <testnum>
+
+Note that if a test fails, the program stops but does not shut the VM
+down or change anything.
+
 # Handy commands
 
 Command to remove all modules:
 
     rmmod `lsmod | tail -n +2 | awk '{ print $1 }'`
+	
+Command to close device 0 on the VM:
+
     echo "Close 0 0" | gensiot -i 'stdio(self)' 'tcp,localhost,2000'

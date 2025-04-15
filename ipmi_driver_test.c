@@ -1,3 +1,12 @@
+/*
+ * Copyright 2025 Corey Minyard
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
+ * This is a test driver to test the IPMI driver on Linux.
+ */
 
 #include <stdio.h>
 #include <string.h>
@@ -10,6 +19,7 @@
 #include <OpenIPMI/ipmiif.h>
 #include <OpenIPMI/ipmi_conn.h>
 #include <OpenIPMI/ipmi_err.h>
+#include <OpenIPMI/ipmi_msgbits.h>
 #include <OpenIPMI/internal/ipmi_event.h>
 
 static int debug;
@@ -76,6 +86,7 @@ struct tinfo {
 
     bool ready;
     bool closing;
+    bool ipmi_open;
     unsigned int close_wait_count;
 
     char inbuf[1024];
@@ -413,7 +424,10 @@ ipmi_cmd_resp(struct tinfo *ti, ipmi_addr_t *addr, unsigned int addrlen,
 	return GE_INVAL;
     }
 
-    *rib = ib;
+    if (!rib)
+	free_ipmibuf(ib);
+    else
+	*rib = ib;
     return 0;
 }
 
@@ -1057,6 +1071,151 @@ test_host_cmd(struct tinfo *ti)
     return rv;
 }
 
+#define NUM_PANIC_EVENTS 3
+#define PANIC_EVENT_SIZE 14
+static uint8_t panic_events[NUM_PANIC_EVENTS][PANIC_EVENT_SIZE] = {
+    { 0x02, 0xcf, 0xcf, 0x51, 0x00, 0x41, 0xf0,
+      0x03, 0x20, 0x73, 0x6f, 0xa1, 0x79, 0x73, },
+    { 0xf0, 0x20, 0x00, 0x73, 0x79, 0x73, 0x72,
+      0x71, 0x20, 0x74, 0x72, 0x69, 0x67, 0x67, },
+    { 0xf0, 0x20, 0x01, 0x65, 0x72, 0x65, 0x64,
+      0x20, 0x63, 0x72, 0x61, 0x73, 0x68, 0x00, },
+};
+
+static int
+test_panic_events(struct tinfo *ti)
+{
+    int rv;
+    struct ipmibuf *ib;
+    struct ipmi_system_interface_addr si;
+    gensio_time timeout = { 2, 0 };
+    struct gensio_waiter *waiter;
+    uint8_t clr_sel_cmddata[6] = { 0x00, 0x00, 'C', 'L', 'R', 0xaa };
+    uint8_t get_sel_cmddata[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0xff };
+    uint8_t chassis_reset_cmddata[1] = { 0x3 };
+    unsigned int i;
+
+    waiter = gensio_os_funcs_alloc_waiter(ti->o);
+    if (!waiter) {
+	pr_err("Error allocating waiter: %s", "No Memory");
+	return 1;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	goto out_err;
+
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+
+    /* Clear the SEL. */
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_STORAGE_NETFN, IPMI_CLEAR_SEL_CMD,
+		       clr_sel_cmddata, sizeof(clr_sel_cmddata),
+		       false, NULL);
+    if (rv)
+	goto out_err;
+
+    rv = helper_cmd_resp(ti, NULL, "Panic", "0");
+    if (rv)
+	goto out_err;
+
+    rv = gensio_close_s(ti->helper);
+    if (rv) {
+	pr_err("Error closing connection: %s\n", gensio_err_to_str(rv));
+	goto out_err;
+    }
+
+    /* Make sure the events have to to get into the event queue. */
+    gensio_os_funcs_wait(ti->o, waiter, 1, &timeout);
+
+    /* Fetch the events. */
+    for (i = 0; ; i++) {
+	uint8_t next1, next2;
+	bool cmp;
+
+	if (i >= NUM_PANIC_EVENTS) {
+	    pr_err("Too many panic events: %d\n", i);
+	    rv = 1;
+	    goto out_err;
+	}
+
+	rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+			   IPMI_STORAGE_NETFN, IPMI_GET_SEL_ENTRY_CMD,
+			   get_sel_cmddata, sizeof(get_sel_cmddata),
+			   false, &ib);
+	if (rv)
+	    goto out_err;
+	
+	if (ib->msgi->msg.data_len < 19) {
+	    pr_err("Invalid SEL get size: %d\n", ib->msgi->msg.data_len);
+	    rv = 1;
+	    goto out_err;
+	}
+	if (panic_events[i][0] == 2) {
+	    /* Event type 2 has a timestamp in bytes 1-4, so ignore those. */
+	    cmp = panic_events[i][0] != ib->msgi->msg.data[5] ||
+		memcmp(ib->msgi->msg.data + 10, panic_events[i] + 5,
+		       PANIC_EVENT_SIZE - 5);
+	} else {
+	    cmp = memcmp(ib->msgi->msg.data + 5, panic_events[i],
+			 PANIC_EVENT_SIZE);
+	}
+	if (cmp) {
+	    char buf1[100], buf2[100], *s;
+	    unsigned int j;
+
+	    for (s = buf1, j = 0; j < 14; j++)
+		s += sprintf(s, " %2.2x", ib->msgi->msg.data[j + 5]);
+	    for (s = buf2, j = 0; j < 14; j++)
+		s += sprintf(s, " %2.2x", panic_events[i][j]);
+	    pr_err("Invalid panic event data on event %d, expected %s, got %s\n",
+		   i, buf2, buf1);
+	    rv = 1;
+	    goto out_err;
+	}
+	next1 = ib->msgi->msg.data[1];
+	next2 = ib->msgi->msg.data[2];
+#if 0
+	printf("RSP:");
+	for (i = 0; i < 19; i++)
+	    printf(" %2.2x", ib->msgi->msg.data[i]);
+	printf("\n");
+#endif
+	free_ipmibuf(ib);
+	if (next1 == 0xff && next2 == 0xff)
+	    break;
+	get_sel_cmddata[2] = next1;
+	get_sel_cmddata[3] = next2;
+    }
+
+    /* Now reset the device. */
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_CHASSIS_NETFN, IPMI_CHASSIS_CONTROL_CMD,
+		       chassis_reset_cmddata, sizeof(chassis_reset_cmddata),
+		       false, NULL);
+    if (rv)
+	goto out_err;
+
+    /* Wait for the reset to complete. */
+    timeout.secs = 10;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, waiter, 1, &timeout);
+
+    rv = gensio_open_s(ti->helper);
+    if (rv) {
+	pr_err("Error reopening helper connection: %s\n", gensio_err_to_str(rv));
+	goto out_err;
+    }
+    gensio_set_read_callback_enable(ti->helper, true);
+
+ out_err:
+    gensio_os_funcs_free_waiter(ti->o, waiter);
+
+    return rv;
+}
+
 struct teststr {
     char *name;
     int (*testfn)(struct tinfo *ti);
@@ -1066,6 +1225,7 @@ struct teststr {
     { "Test basic commands", test_cmd },
     { "Test basic IPMI LAN commands", test_ipmilan_cmd },
     { "Test commands to host", test_host_cmd },
+    { "Test panic events", test_panic_events },
     {}
 };
 
@@ -1173,6 +1333,17 @@ handle_buf(struct tinfo *ti)
 	    }
 	    copy_string(sb->response, end, sizeof(sb->response));
 	    sb->done = true;
+	}
+    } else if (strncmp(ti->inbuf, "Panic ", 6) == 0) {
+	end = ti->inbuf + 6;
+	sb = find_waiting_helperbuf(ti, true, &end);
+	if (!sb) {
+	    pr_err("Unknown panic: %s\n", ti->inbuf);
+	} else if (!sb->needs_resp && sb->free_after_send) {
+	    helperbuf_unlink_free(ti, sb);
+	} else {
+	    sb->done = true;
+	    sb->response[0] = '\0';
 	}
     } else if (strncmp(ti->inbuf, "Runrsp ", 7) == 0) {
 	end = ti->inbuf + 7;
@@ -1365,7 +1536,10 @@ ipmi_con_changed_handler(ipmi_con_t   *con,
 	    start_test_close(ti);
     }
 
-    gensio_os_funcs_wake(ti->o, ti->waiter);
+    if (!ti->ipmi_open) {
+	gensio_os_funcs_wake(ti->o, ti->waiter);
+	ti->ipmi_open = true;
+    }
 }
 
 static void
@@ -1530,6 +1704,9 @@ main(int argc, char *argv[])
     int rv, testnum = -1;
     gensio_time timeout;
     int argp = 1;
+    uint8_t chassis_on_cmddata[1] = { 0x1 };
+    struct ipmi_system_interface_addr si;
+    struct gensio_waiter *tmpwaiter = NULL;
 
     while (argp < argc && argv[argp][0] == '-') {
 	if (strcmp(argv[argp], "-d") == 0) {
@@ -1579,9 +1756,51 @@ main(int argc, char *argv[])
 	goto out_close;
     }
 
+    tmpwaiter = gensio_os_funcs_alloc_waiter(ti.o);
+    if (!tmpwaiter) {
+	fprintf(stderr, "Could not allocate waiter, out of memory\n");
+	ti.rv = 1;
+	goto out_close;
+    }
+
     if (ipmi_setup_con(&ti)) {
 	ti.rv = 1;
 	goto out_close;
+    }
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    rv = gensio_os_funcs_wait(ti.o, ti.waiter, 1, &timeout);
+    if (rv) {
+	fprintf(stderr, "Error setting up IPMI connections: %s\n",
+		gensio_err_to_str(rv));
+	ti.rv = 1;
+	goto out_close;
+    }
+
+    /*
+     * Only power on and off the VM if running all the tests.  If only
+     * running one test, assume the VM is already up.
+     */
+    if (testnum == -1) {
+	printf("Powering on the virtual machine, this may take a bit...");
+	fflush(stdout);
+	si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+	si.channel = 0xf;
+	si.lun = 0;
+	rv = ipmi_cmd_resp(&ti, (ipmi_addr_t *) &si, sizeof(si),
+			   IPMI_CHASSIS_NETFN, IPMI_CHASSIS_CONTROL_CMD,
+			   chassis_on_cmddata, sizeof(chassis_on_cmddata),
+			   false, NULL);
+	if (rv) {
+	    fprintf(stderr, "Could not power on virtual machine: %s\n",
+		    gensio_err_to_str(rv));
+	    goto out_wait_close;
+	}
+	/* Wait for power up to complete. */
+	timeout.secs = 10;
+	timeout.nsecs = 0;
+	gensio_os_funcs_wait(ti.o, tmpwaiter, 1, &timeout);
+	printf(" done\n");
     }
 
     if (helper_setup_con(&ti)) {
@@ -1592,7 +1811,7 @@ main(int argc, char *argv[])
 
     timeout.secs = 2;
     timeout.nsecs = 0;
-    rv = gensio_os_funcs_wait(ti.o, ti.waiter, 2, &timeout);
+    rv = gensio_os_funcs_wait(ti.o, ti.waiter, 1, &timeout);
     if (rv) {
 	fprintf(stderr, "Error setting up connections: %s\n",
 		gensio_err_to_str(rv));
@@ -1603,6 +1822,22 @@ main(int argc, char *argv[])
     ti.ready = true;
 
     run_tests(&ti, testnum);
+
+    if (testnum == -1) {
+	struct helperbuf *sb;
+
+	printf("Powering off the virtual machine\n");
+	sb = helper_send_cmd(&ti, "Runcmd", "poweroff");
+	if (!sb) {
+	    fprintf(stderr, "Unable to send Runcmd poweroff");
+	    goto out_close;
+	}
+	timeout.secs = 2;
+	timeout.nsecs = 0;
+	gensio_os_funcs_wait(ti.o, tmpwaiter, 1, &timeout);
+	helperbuf_unlink_free(sb->ti, sb);
+    }
+
     start_test_close(&ti);
 
  out_wait_close:
@@ -1614,6 +1849,8 @@ main(int argc, char *argv[])
     }
 
  out_close:
+    if (tmpwaiter)
+	gensio_os_funcs_free_waiter(ti.o, tmpwaiter);
     if (ti.waiter)
 	gensio_os_funcs_free_waiter(ti.o, ti.waiter);
     if (proc_data)

@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Corey Minyard
+ * Copyright 2025 Corey Minyard
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -508,15 +508,13 @@ start_ioinfo_close(struct ioinfo *ii)
 	    }
 	}
     }
-	 
+
     ii->closing = true;
     rv = gensio_close(ii->io, close_done, ii);
     if (rv) {
 	/* Should be impossible, but just in case... */
 	fprintf(stderr, "Error closing io: %s\n", gensio_err_to_str(rv));
-	gensio_list_rm(&ii->ai->ios, &ii->link);
-	gensio_free(ii->io);
-	free(ii);
+	close_done(ii->io, ii);
     }
 }
 
@@ -836,14 +834,25 @@ handle_panic(struct ioinfo *iic, unsigned long long id, const char **tokens)
     gensio_time timeout = {1, 0};
     struct gensio_link *l;
     int fd;
+    bool any_waiting = true;
 
     add_output_buf_all(ai, "Panic %lld\n", id);
-    gensio_acc_shutdown(ai->acc, shutdown_done, ai);
-    gensio_list_for_each(&ai->ios, l) {
-	struct ioinfo *ii = gensio_container_of(l, struct ioinfo, link);
+    while (any_waiting) {
+	any_waiting = false;
+	gensio_list_for_each(&ai->ios, l) {
+	    struct ioinfo *ii = gensio_container_of(l, struct ioinfo, link);
 
-	gensio_close(ii->io, close_done, ii);
+	    if (!gensio_list_empty(&ii->writelist)) {
+		any_waiting = true;
+		break;
+	    }
+	}
+	timeout.secs = 1;
+	timeout.nsecs = 0;
+	gensio_os_funcs_service(ai->o, &timeout);
     }
+    timeout.secs = 1;
+    timeout.nsecs = 0;
     gensio_os_funcs_wait(ai->o, ai->waiter, 1, &timeout);
     fd = open("/proc/sysrq-trigger", O_WRONLY);
     if (fd == -1) {
