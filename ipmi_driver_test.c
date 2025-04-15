@@ -1553,7 +1553,9 @@ helper_open_done(struct gensio *io, int err, void *open_data)
     if (err) {
 	pr_err("helper connection failure: %s\n", gensio_err_to_str(err));
 	gensio_free(io);
+	ti->rv = 1;
 	ti->helper = NULL;
+	return;
     }
 
     gensio_set_read_callback_enable(ti->helper, true);
@@ -1818,6 +1820,8 @@ main(int argc, char *argv[])
 	ti.rv = 1;
 	goto out_close;
     }
+    if (ti.rv)
+	goto out_close;
 
     ti.ready = true;
 
