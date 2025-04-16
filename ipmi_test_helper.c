@@ -46,6 +46,8 @@
  *     Shut down the program.
  *   Runcmd <id> <shell command>
  *     Run the given command and return the response in Runrsp
+ *   Write <id> <file> <data>
+ *     Write some data to a file.
  *
  * <dev> is the particular IPMI device, 0-9.
  * <devidx> is an index into an array of open devices.  Note that you
@@ -1424,6 +1426,48 @@ handle_runcmd(struct ioinfo *ii, unsigned long long id, const char **tokens)
 }
 
 static void
+handle_write(struct ioinfo *ii, unsigned long long id, const char **tokens)
+{
+    int rv = 0, fd, len;
+
+    if (!tokens[0]) {
+	add_output_buf(ii, "Done %llu No file given", id);
+	return;
+    }
+
+    if (!tokens[1]) {
+	add_output_buf(ii, "Done %llu No data to write", id);
+	return;
+    }
+
+    fd = open(tokens[0], O_WRONLY);
+    if (fd == -1) {
+	add_output_buf(ii, "Done %llu Unable to open file: %s", id,
+		       strerror(errno));
+	return;
+    }
+
+    len = strlen(tokens[1]);
+    if (len > 0) {
+	rv = write(fd, tokens[1], len);
+	if (rv != len) {
+	    if (rv == -1)
+		add_output_buf(ii, "Done %llu Unable to write file: %s", id,
+			       strerror(errno));
+	    else
+		add_output_buf(ii, "Done %llu Write file write %d, expected %d",
+			       id, rv, len);
+	} else {
+	    rv = 0;
+	}
+    }
+
+    close(fd);
+    if (!rv)
+	add_output_buf(ii, "Done %llu", id);
+}
+
+static void
 handle_quit(struct ioinfo *ii, unsigned long long id, const char **tokens)
 {
     struct accinfo *ai = ii->ai;
@@ -1461,6 +1505,7 @@ static struct {
     { "Unregister", handle_unregister },
     { "EvEnable", handle_evenable },
     { "Runcmd", handle_runcmd },
+    { "Write", handle_write },
     {}
 };
 

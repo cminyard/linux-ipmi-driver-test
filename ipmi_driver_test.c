@@ -1088,6 +1088,143 @@ test_host_cmd(struct tinfo *ti)
     return rv;
 }
 
+static int
+cmp_file_list(struct tinfo *ti, const char *name, const char *dir, ...)
+{
+    int rv;
+    va_list ap;
+    char *s, *t, *saveptr;
+    struct helperbuf *sb;
+
+    va_start(ap, dir);
+
+    rv = helper_cmd_resp(ti, &sb, "Runcmd", "ls /sys/class/ipmi");
+    if (rv)
+	return rv;
+    rv = 1;
+    if (sb->rc) {
+	pr_err("Dump %s failed (%d): %s\n", name, sb->rc, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	goto out;
+    }
+    t = strtok_r(sb->response, " \t\n", &saveptr);
+    s = va_arg(ap, char *);
+    do {
+	if (t == NULL && s != NULL) {
+	    pr_err("Dump %s unexpected extra item: %s\n", name, s);
+	    goto out;
+	}
+	if (t != NULL && s == NULL) {
+	    pr_err("Dump %s missing item: %s\n", name, t);
+	    goto out;
+	}
+	if (strcmp(t, s) != 0) {
+	    pr_err("Dump %s got item %s, expected %s\n", name, t, s);
+	    goto out;
+	}
+	t = strtok_r(NULL, " \t\n", &saveptr);
+	s = va_arg(ap, char *);
+    } while (t || s);
+
+    rv = 0;
+ out:
+    helperbuf_unlink_free(ti, sb);
+    va_end(ap);
+    return rv;
+}
+
+static int
+test_hotmod(struct tinfo *ti)
+{
+    struct helperbuf *sb = NULL;
+    int rv;
+    struct cmdwaiter cw;
+    gensio_time timeout;
+
+    memset(&cw, 0, sizeof(cw));
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	return rv;
+
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+    /* Basic delete/add tests. */
+    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+		       "ipmi0", "ipmi1", NULL);
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
+			 "/sys/module/ipmi_si/parameters/hotmod",
+			 "remove,bt,i/o,0xe4");
+    if (rv)
+	return rv;
+
+    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+		       "ipmi1", NULL);
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
+			 "/sys/module/ipmi_si/parameters/hotmod",
+			 "add,bt,i/o,0xe4,irq=5");
+    if (rv)
+	return rv;
+
+    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+		       "ipmi0", "ipmi1", NULL);
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    /* Now send a message and delete the interface. */
+    sb = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
+    if (!sb) {
+	pr_err("Out of memory sending command '%s %s\n", "Command",
+	       "0 si f 0 6 1");
+	return 1;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
+			 "/sys/module/ipmi_si/parameters/hotmod",
+			 "remove,bt,i/o,0xe4");
+    if (rv) {
+	helper_wait_done(sb);
+	helperbuf_unlink_free(sb->ti, sb);
+	return rv;
+    }
+
+    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+		       "ipmi1", NULL);
+    if (rv)
+	return rv;
+
+    rv = helper_wait_done(sb);
+    if (rv) {
+	helper_wait_done_print_err(rv, sb, "Command", "0 si f 0 6 1");
+	rv = 1;
+    }
+    helperbuf_unlink_free(sb->ti, sb);
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_si ipmi_msghandler");
+    if (rv)
+	return rv;
+
+    return rv;
+}
+
 #define NUM_PANIC_EVENTS 3
 #define PANIC_EVENT_SIZE 14
 static uint8_t panic_events[NUM_PANIC_EVENTS][PANIC_EVENT_SIZE] = {
@@ -1234,6 +1371,7 @@ struct teststr {
     { "Test basic IPMI LAN commands", test_ipmilan_cmd },
     { "Test commands to host", test_host_cmd },
     { "Test panic events", test_panic_events },
+    { "Test hotmod", test_hotmod },
     {}
 };
 
