@@ -1468,6 +1468,7 @@ struct teststr {
     { "Test event", test_events },
     {}
 };
+#define TESTS_SIZE ((sizeof(tests) / sizeof(struct teststr)) - 1)
 
 static int
 run_test(struct tinfo *ti, struct teststr *test)
@@ -1978,8 +1979,13 @@ main(int argc, char *argv[])
 	argp++;
     }
 
-    if (argp < argc)
+    if (argp < argc) {
 	testnum = atoi(argv[argp]);
+	if (testnum < 0 || testnum >= TESTS_SIZE) {
+	    fprintf(stderr, "Invalid test number: %s\n", argv[argp]);
+	    return 1;
+	}
+    }
 
     memset(&ti, 0, sizeof(ti));
 
