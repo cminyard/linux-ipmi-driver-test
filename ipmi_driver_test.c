@@ -58,6 +58,15 @@ struct ipmibuf {
 };
 
 /*
+ * Holds received events.
+ */
+struct eventbuf {
+    struct gensio_link link;
+    unsigned int devidx;
+    char data[256];
+};
+
+/*
  * Commands sent by the helper to here are handled through this.
  */
 struct cmdwaiter {
@@ -103,6 +112,9 @@ struct tinfo {
 
     /* List of struct cmdwaiter waiting for a command from the helper. */
     struct gensio_list cmdwaitlist;
+
+    /* List of received events in struct eventbuf. */
+    struct gensio_list eventlist;
 };
 
 static void start_test_close(struct tinfo *ti);
@@ -148,6 +160,7 @@ i_pr_err(const char *file, unsigned int line, char *fmt, ...)
     va_end(ap);
 }
 #define pr_err(fmt, ...) i_pr_err(__FILE__, __LINE__, fmt, __VA_ARGS__)
+#define pr_err_s(str) i_pr_err(__FILE__, __LINE__, "%s", str)
 
 static int
 get_uint(char *name, char **str, bool allow_end, unsigned int *rval)
@@ -1225,6 +1238,86 @@ test_hotmod(struct tinfo *ti)
     return rv;
 }
 
+static int
+test_events(struct tinfo *ti)
+{
+    int rv;
+    gensio_time timeout = { 2, 0 };
+    struct gensio_link *l, *l2;
+    struct eventbuf *ev;
+    struct ipmi_system_interface_addr si;
+    static uint8_t event_data[] = { 0x40, 0x03, 1, 2, 3, 4, 5, 6 };
+    static char expected_event[] = { "40 10 03 01 02 03 04 05 06" };
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    gensio_list_for_each_safe(&ti->eventlist, l, l2) {
+	ev = gensio_container_of(l, struct eventbuf, link);
+	gensio_list_rm(&ti->eventlist, l);
+	pr_err("Warning: extra event in event list from devdix %d: %s\n",
+	       ev->devidx, ev->data);
+	gensio_os_funcs_zfree(ti->o, ev);
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "EvEnable", "0 1");
+    if (rv)
+	return rv;
+
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_SENSOR_EVENT_NETFN, IPMI_PLATFORM_EVENT_CMD,
+		       event_data, sizeof(event_data),
+		       false, NULL);
+    if (rv)
+	return rv;
+
+    while (gensio_list_empty(&ti->eventlist)) {
+	rv = gensio_os_funcs_service(ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED) {
+	    pr_err_s("Warning: Didn't get event\n");
+	    return rv;
+	}
+    }
+    l = gensio_list_first(&ti->eventlist);
+    gensio_list_rm(&ti->eventlist, l);
+    ev = gensio_container_of(l, struct eventbuf, link);
+    gensio_os_funcs_zfree(ti->o, ev);
+
+    if (ev->devidx != 0) {
+	pr_err("Event from unexpected device %d\n", ev->devidx);
+	return 1;
+    }
+    if (strcmp(ev->data + 21, expected_event) != 0) {
+	pr_err("Unexpected event data, got '%s', expected '%s'",
+	       ev->data + 21, expected_event);
+	return 1;
+    }
+
+    if (!gensio_list_empty(&ti->eventlist)) {
+	pr_err_s("Extra event received\n");
+	return 1;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_si ipmi_msghandler");
+    if (rv)
+	return rv;
+
+    return rv;
+}
+
 #define NUM_PANIC_EVENTS 3
 #define PANIC_EVENT_SIZE 14
 static uint8_t panic_events[NUM_PANIC_EVENTS][PANIC_EVENT_SIZE] = {
@@ -1372,6 +1465,7 @@ struct teststr {
     { "Test commands to host", test_host_cmd },
     { "Test panic events", test_panic_events },
     { "Test hotmod", test_hotmod },
+    { "Test event", test_events },
     {}
 };
 
@@ -1506,6 +1600,19 @@ handle_buf(struct tinfo *ti)
 	    sb->done = true;
 	    sb->got_resp = true;
 	}
+    } else if (strncmp(ti->inbuf, "Event ", 6) == 0) {
+	struct eventbuf *ev;
+
+	end = ti->inbuf + 6;
+	ev = gensio_os_funcs_zalloc(ti->o, sizeof(*ev));
+	if (!ev) {
+	    pr_err_s("Unable to allocate memory for eventbuf\n");
+	    return;
+	}
+	if (get_uint("event devidx", &end, false, &ev->devidx))
+	    return;
+	copy_string(ev->data, end, sizeof(ev->data));
+	gensio_list_add_tail(&ti->eventlist, &ev->link);
     } else if (strncmp(ti->inbuf, "Response ", 9) == 0) {
 	end = ti->inbuf + 9;
 	sb = find_waiting_helperbuf(ti, false, &end);
@@ -1879,6 +1986,7 @@ main(int argc, char *argv[])
     gensio_list_init(&ti.writelist);
     gensio_list_init(&ti.waitlist);
     gensio_list_init(&ti.cmdwaitlist);
+    gensio_list_init(&ti.eventlist);
 
     rv = gensio_alloc_os_funcs(GENSIO_DEF_WAKE_SIG, &ti.o, 0);
     if (rv) {
