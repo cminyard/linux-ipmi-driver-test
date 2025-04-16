@@ -224,7 +224,7 @@ sendbuf_dup(struct gensio_os_funcs *o, const struct sendbuf *s)
 }
 
 static struct sendbuf *
-al_vsprintf(struct gensio_os_funcs *o, char endc, char *str, va_list ap)
+al_vsprintf(struct gensio_os_funcs *o, char *str, va_list ap)
 {
     struct sendbuf *s;
     va_list ap2;
@@ -233,7 +233,7 @@ al_vsprintf(struct gensio_os_funcs *o, char endc, char *str, va_list ap)
 
     va_copy(ap2, ap);
     len = vsnprintf(&dummy, 1, str, ap);
-    s = gensio_os_funcs_zalloc(o, sizeof(struct sendbuf) + len + 2);
+    s = gensio_os_funcs_zalloc(o, sizeof(struct sendbuf) + len + 1);
     if (!s)
 	return NULL;
     s->len = len + 1;
@@ -241,8 +241,7 @@ al_vsprintf(struct gensio_os_funcs *o, char endc, char *str, va_list ap)
     s->data = ((unsigned char *) s) + sizeof(*s);
     vsnprintf((char *) s->data, len + 1, str, ap2);
     va_end(ap2);
-    s->data[len] = endc;
-    s->data[len + 1] = '\0';
+    s->data[len] = '\0';
 
     return s;
 }
@@ -271,7 +270,7 @@ al_vsprintf_data(struct gensio_os_funcs *o,
 	    len += 1 + strlen(data[i].header);
 	len += 3 * data[i].len;
     }
-    s = gensio_os_funcs_zalloc(o, sizeof(struct sendbuf) + len + 2);
+    s = gensio_os_funcs_zalloc(o, sizeof(struct sendbuf) + len + 1);
     if (!s)
 	return NULL;
     s->len = len + 1;
@@ -285,8 +284,7 @@ al_vsprintf_data(struct gensio_os_funcs *o,
 	for (j = 0; j < data[i].len; j++)
 	    len += sprintf((char *) s->data + len, " %2.2x", data[i].data[j]);
     }
-    s->data[len] = '\n';
-    s->data[len + 1] = '\0';
+    s->data[len] = '\0';
 
     return s;
 }
@@ -313,7 +311,7 @@ add_output_buf(struct ioinfo *ii, char *str, ...)
     struct sendbuf *s;
 
     va_start(ap, str);
-    s = al_vsprintf(ii->ai->o, '\n', str, ap);
+    s = al_vsprintf(ii->ai->o, str, ap);
     va_end(ap);
 
     gensio_list_add_tail(&ii->writelist, &s->link);
@@ -328,7 +326,7 @@ add_output_msgrsp(struct ioinfo *ii, char *str, ...)
     struct sendbuf *s;
 
     va_start(ap, str);
-    s = al_vsprintf(ii->ai->o, '\0', str, ap);
+    s = al_vsprintf(ii->ai->o, str, ap);
     va_end(ap);
 
     gensio_list_add_tail(&ii->writelist, &s->link);
@@ -366,7 +364,7 @@ add_output_buf_all(struct accinfo *ai, char *str, ...)
 	return;
 
     va_start(ap, str);
-    s = al_vsprintf(ai->o, '\n', str, ap);
+    s = al_vsprintf(ai->o, str, ap);
     va_end(ap);
     if (!s)
 	return;
@@ -836,7 +834,7 @@ handle_panic(struct ioinfo *iic, unsigned long long id, const char **tokens)
     int fd;
     bool any_waiting = true;
 
-    add_output_buf_all(ai, "Panic %lld\n", id);
+    add_output_buf_all(ai, "Panic %lld", id);
     while (any_waiting) {
 	any_waiting = false;
 	gensio_list_for_each(&ai->ios, l) {
@@ -1531,7 +1529,7 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 
 	len = *buflen;
 	for (i = 0; i < len; i++) {
-	    if (buf[i] == '\n' || buf[i] == '\r') {
+	    if (buf[i] == '\0') {
 		ii->inbuf[ii->inbuf_len] = '\0';
 		handle_it = true;
 		i++;

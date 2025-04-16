@@ -446,7 +446,7 @@ alloc_helperbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
     va_copy(ap2, ap);
     len = vsnprintf(dummy, 21, str, ap);
     len += snprintf(dummy, 21, "%s %llu ", cmd, ti->curr_id);
-    s = gensio_os_funcs_zalloc(o, sizeof(struct helperbuf) + len + 2);
+    s = gensio_os_funcs_zalloc(o, sizeof(struct helperbuf) + len + 1);
     if (!s)
 	return NULL;
     s->len = len + 1;
@@ -455,8 +455,7 @@ alloc_helperbuf(struct tinfo *ti, const char *cmd, const char *str, va_list ap)
     len2 = snprintf((char *) s->data, len + 1, "%s %llu ", cmd, ti->curr_id);
     vsnprintf(((char *) s->data) + len2, len - len2 + 1, str, ap2);
     va_end(ap2);
-    s->data[len] = '\n';
-    s->data[len + 1] = '\0';
+    s->data[len] = '\0';
     s->ti = ti;
     s->id = ti->curr_id++;
     copy_string(s->response, "No Response", sizeof(s->response));
@@ -1459,7 +1458,7 @@ io_event(struct gensio *io, void *user_data, int event, int err,
 		    i++;
 		    break;
 		}
-	    } else if (buf[i] == '\n' || buf[i] == '\r' || buf[i] == '\0') {
+	    } else if (buf[i] == '\0') {
 		ti->inbuf[ti->inbuf_len] = '\0';
 
 		if (buf[i] != '\0' && strncmp(ti->inbuf, "Runrsp ", 7) == 0) {
