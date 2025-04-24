@@ -807,6 +807,8 @@ test_cmd(struct tinfo *ti)
 	"0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
     static char *mc30_getdevid_rsp =
 	"0 ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00";
+    static char *bmc1_getdevid_rsp =
+	"0 si 0f 00 07 01 00 20 00 00 00 02 07 00 00 00 00 00";
     unsigned int count;
     unsigned int restart_count = 0;
     const char *module = "ipmi_ssif";
@@ -946,8 +948,31 @@ test_cmd(struct tinfo *ti)
 	goto restart;
     }
 
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_si");
+    if (rv)
+	return 1;
+
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 1");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc1_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC1 get devid resp, expected '%s', got '%s'\n",
+	       bmc1_getdevid_rsp, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    helperbuf_unlink_free(ti, sb);
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
     rv = helper_cmd_resp(ti, NULL, "Unload",
-			 "ipmi_devintf ipmi_msghandler i2c-i801");
+			 "ipmi_devintf ipmi_si ipmi_msghandler i2c-i801");
     if (rv)
 	return rv;
 
@@ -1454,6 +1479,160 @@ test_panic_events(struct tinfo *ti)
     return rv;
 }
 
+struct ipmi_cmd {
+    char *cmd;
+    char *rsp;
+};
+
+#define ARRAY_SIZE(a) ((sizeof(a) / sizeof((a)[1])))
+
+struct ipmi_cmd ipmi_cmds_bmc0[] = {
+#if 0
+    {
+	.cmd = "si f 0 6 1",
+	.rsp = "si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00"
+    },
+#endif
+    {
+	.cmd = "ipmb 0 30 0 6 1",
+	.rsp = "ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00"
+    },
+};
+#define BMC0_CMDS_SIZE ARRAY_SIZE(ipmi_cmds_bmc0)
+
+struct ipmi_cmd ipmi_cmds_bmc1[] = {
+    {
+	.cmd = "si f 0 6 1",
+	.rsp = "si 0f 00 07 01 00 20 00 00 00 02 07 00 00 00 00 00"
+    },
+};
+#define BMC1_CMDS_SIZE ARRAY_SIZE(ipmi_cmds_bmc1)
+
+static int
+send_random_command(struct tinfo *ti, unsigned int i, struct helperbuf **rsb,
+		    struct ipmi_cmd cmds[], unsigned int cmds_size,
+		    unsigned int *picked_cmd)
+{
+    unsigned int cmd = rand();
+    struct helperbuf *sb;
+
+    cmd = cmd % cmds_size;
+    sb = helper_send_cmd(ti, "Command", "%d %s", i, cmds[cmd].cmd);
+    if (!sb) {
+	pr_err_s("Out of memory sending command\n");
+	return 1;
+    }
+    *rsb = sb;
+    *picked_cmd = cmd;
+    return 0;
+}
+
+static unsigned int num_stress_cmds = 1000;
+
+struct ipmi_dev_info {
+    int ipmi_devnum;
+    struct ipmi_cmd *cmds;
+    unsigned int cmds_size;
+} ipmi_stress_devs[] = {
+    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
+    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
+    { 1, ipmi_cmds_bmc1, BMC1_CMDS_SIZE },
+    { 2, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
+    { 2, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
+};
+#define NUM_IPMI_STRESS_DEVS ARRAY_SIZE(ipmi_stress_devs)
+
+static int
+test_stress(struct tinfo *ti)
+{
+    int rv;
+    struct helperbuf *sb[NUM_IPMI_STRESS_DEVS];
+    unsigned int curr_cmd[NUM_IPMI_STRESS_DEVS] = {};
+    struct ipmi_cmd *ipmi_cmds[NUM_IPMI_STRESS_DEVS];
+    unsigned int ipmi_cmds_size[NUM_IPMI_STRESS_DEVS];
+    unsigned int count[NUM_IPMI_STRESS_DEVS] = {};
+    gensio_time timeout;
+    unsigned int i, num_left = NUM_IPMI_STRESS_DEVS;
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_si ipmi_ssif");
+    if (rv)
+	return rv;
+
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+
+    /* Open NUM_IPMI_STRESS_DEVS IPMI devices. */
+    for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
+	     rv = helper_cmd_resp(ti, NULL, "Open", "%d %d", i,
+				  ipmi_stress_devs[i].ipmi_devnum);
+	 if (rv)
+	     return rv;
+	 ipmi_cmds[i] = ipmi_stress_devs[i].cmds;
+	 ipmi_cmds_size[i] = ipmi_stress_devs[i].cmds_size;
+    }
+
+    for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
+	rv = send_random_command(ti, i, &sb[i],
+				 ipmi_cmds[i], ipmi_cmds_size[i],
+				 &curr_cmd[i]);
+	if (rv)
+	    return rv;
+    }
+    timeout.secs = 30;
+    timeout.nsecs = 0;
+    while (num_left > 0) {
+	rv = gensio_os_funcs_service(ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED)
+	    return rv;
+	if (ti->rv)
+	    return 1;
+	for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
+	    if (sb[i]->rc)
+		return 1;
+	    if (count[i] < num_stress_cmds && sb[i]->got_resp) {
+		struct ipmi_cmd *cmd = &ipmi_cmds[i][curr_cmd[i]];
+
+		if (debug)
+		    printf("%d done %d %d\n", i, curr_cmd[i], count[i]);
+		if (atoi(sb[i]->response) != i ||
+			strcmp(cmd->rsp, sb[i]->response + 2) != 0) {
+		    pr_err("Invalid response to command '%s', expected '%d %s', got '%s'\n",
+			   cmd->cmd, i, cmd->rsp, sb[i]->response);
+		    return 1;
+		}
+		/* FIXME - add response check. */
+		helperbuf_unlink_free(ti, sb[i]);
+		count[i]++;
+		if (count[i] >= num_stress_cmds) {
+		    num_left--;
+		} else {
+		    rv = send_random_command(ti, i, &sb[i],
+					     ipmi_cmds[i], ipmi_cmds_size[i],
+					     &curr_cmd[i]);
+		    if (rv)
+			return rv;
+		}
+	    }
+	}
+    }
+
+    for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
+	rv = helper_cmd_resp(ti, NULL, "Close", "%d", i);
+	if (rv)
+	    return rv;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_si ipmi_ssif ipmi_msghandler i2c-i801");
+    if (rv)
+	return rv;
+
+    return 0;
+}
+
 struct teststr {
     char *name;
     int (*testfn)(struct tinfo *ti);
@@ -1466,9 +1645,9 @@ struct teststr {
     { "Test panic events", test_panic_events },
     { "Test hotmod", test_hotmod },
     { "Test event", test_events },
-    {}
+    { "Test under stress", test_stress },
 };
-#define TESTS_SIZE ((sizeof(tests) / sizeof(struct teststr)) - 1)
+#define TESTS_SIZE ARRAY_SIZE(tests)
 
 static int
 run_test(struct tinfo *ti, struct teststr *test)
@@ -1504,7 +1683,7 @@ run_tests(struct tinfo *ti, int testnum)
 	}
     }
 
-    for (i = 0; tests[i].name; i++) {
+    for (i = 0; i < TESTS_SIZE; i++) {
 	rv = run_test(ti, &tests[i]);
 	if (rv)
 	    break;
@@ -1962,6 +2141,8 @@ main(int argc, char *argv[])
     int argp = 1;
     uint8_t chassis_on_cmddata[1] = { 0x1 };
     struct ipmi_system_interface_addr si;
+
+    srand(time(NULL));
 
     while (argp < argc && argv[argp][0] == '-') {
 	if (strcmp(argv[argp], "-d") == 0) {
