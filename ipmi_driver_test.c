@@ -1479,6 +1479,7 @@ test_panic_events(struct tinfo *ti)
     return rv;
 }
 
+/* A bunch of different commands for random testing. */
 struct ipmi_cmd {
     char *cmd;
     char *rsp;
@@ -1487,23 +1488,73 @@ struct ipmi_cmd {
 #define ARRAY_SIZE(a) ((sizeof(a) / sizeof((a)[1])))
 
 struct ipmi_cmd ipmi_cmds_bmc0[] = {
-#if 0
     {
 	.cmd = "si f 0 6 1",
 	.rsp = "si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00"
     },
-#endif
+    {
+	.cmd = "si f 0 6 42 e",
+	.rsp = "si 0f 00 07 42 00 0f 0c 08 00 f2 1b 00 00 00"
+    },
     {
 	.cmd = "ipmb 0 30 0 6 1",
 	.rsp = "ipmb 00 30 00 07 01 00 02 08 10 01 02 a0 91 12 00 03 0f 00 00 00 00"
     },
+    {
+	.cmd = "si f 0 0 0",
+	.rsp = "si 0f 00 01 00 00 00 20 20 20 20"
+    },
+    {
+	.cmd = "si f 0 0 1",
+	.rsp = "si 0f 00 01 01 00 01 00 00"
+    },
 };
 #define BMC0_CMDS_SIZE ARRAY_SIZE(ipmi_cmds_bmc0)
+
+/*
+ * Note that there is only one receive queue on the BMC, and it's
+ * handled by channel 15.  If you have two interfaces to the same BMC,
+ * if you send a command to IPMB over the non-15 channel, it will come
+ * back to channel 15 becaus that's the way the receive queue works.
+ * So no IPMB for the second interface to the external BMC.  Also, the
+ * response to the get channel info will be different.
+ */
+struct ipmi_cmd ipmi_cmds_bmc0_2[] = {
+    {
+	.cmd = "si f 0 6 1",
+	.rsp = "si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00"
+    },
+    {
+	.cmd = "si f 0 6 42 e",
+	.rsp = "si 0f 00 07 42 00 07 09 04 00 f2 1b 00 00 00"
+    },
+    {
+	.cmd = "si f 0 0 0",
+	.rsp = "si 0f 00 01 00 00 00 20 20 20 20"
+    },
+    {
+	.cmd = "si f 0 0 1",
+	.rsp = "si 0f 00 01 01 00 01 00 00"
+    },
+};
+#define BMC0_2_CMDS_SIZE ARRAY_SIZE(ipmi_cmds_bmc0_2)
 
 struct ipmi_cmd ipmi_cmds_bmc1[] = {
     {
 	.cmd = "si f 0 6 1",
 	.rsp = "si 0f 00 07 01 00 20 00 00 00 02 07 00 00 00 00 00"
+    },
+    {
+	.cmd = "si f 0 6 42 e",
+	.rsp = "si 0f 00 07 42 c1"
+    },
+    {
+	.cmd = "si f 0 0 0",
+	.rsp = "si 0f 00 01 00 00 00 20 20 20 20"
+    },
+    {
+	.cmd = "si f 0 0 1",
+	.rsp = "si 0f 00 01 01 00 61 00 00 00"
     },
 };
 #define BMC1_CMDS_SIZE ARRAY_SIZE(ipmi_cmds_bmc1)
@@ -1537,8 +1588,8 @@ struct ipmi_dev_info {
     { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
     { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
     { 1, ipmi_cmds_bmc1, BMC1_CMDS_SIZE },
-    { 2, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
-    { 2, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
+    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE },
+    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE },
 };
 #define NUM_IPMI_STRESS_DEVS ARRAY_SIZE(ipmi_stress_devs)
 
