@@ -1632,7 +1632,14 @@ test_stress(struct tinfo *ti)
 	if (rv)
 	    return rv;
     }
-    timeout.secs = 30;
+
+    /*
+     * Measurements tell us that 1000 messages will take around 14
+     * seconds to complete.  So let's say 30 seconds to be sure.
+     * That's 33ms per message.  Then add a couple of seconds for
+     * small numbers.
+     */
+    timeout.secs = ((33 * num_stress_cmds) + 999) / 1000 + 2;
     timeout.nsecs = 0;
     while (num_left > 0) {
 	rv = gensio_os_funcs_service(ti->o, &timeout);
@@ -2198,6 +2205,13 @@ main(int argc, char *argv[])
     while (argp < argc && argv[argp][0] == '-') {
 	if (strcmp(argv[argp], "-d") == 0) {
 	    debug++;
+	} else if (strcmp(argv[argp], "-n") == 0) {
+	    argp++;
+	    if (argp >= argc) {
+		fprintf(stderr, "No parameter given for -n option\n");
+		return 1;
+	    }
+	    num_stress_cmds = strtoul(argv[argp], NULL, 0);
 	} else if (strcmp(argv[argp], "-l") == 0) {
 	    unsigned int i;
 
