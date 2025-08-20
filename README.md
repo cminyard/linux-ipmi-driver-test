@@ -92,7 +92,7 @@ You can power the VM on with:
 	
 Or you can use ipmicmd:
 
-    openipmicmd -k 'f 0 6 1' lan -U ipmiusr -P test -p 9001 localhost
+    openipmicmd -k 'f 0 0 2 1' lan -U ipmiusr -P test -p 9001 localhost
 	
 You can connect to the console with:
 
@@ -101,7 +101,7 @@ You can connect to the console with:
 After this, transfer the modules to the target:
 
     scp -P 5556 Zx86_64/drivers/char/ipmi/*.ko \
-	    Zx86_64/drivers/i2c/busses/i2c-i801.ko root@localhost
+	    Zx86_64/drivers/i2c/busses/i2c-i801.ko root@localhost:
 
 Note that my kernel build is in Zx86_64, you need to use the location
 of your kernel build for this.
