@@ -638,6 +638,28 @@ verify_file_contents(struct tinfo *ti, const char *dir, const char *file,
 }
 
 static int
+check_close(struct tinfo *ti, int device, int nr_users)
+{
+    int rv;
+    char dir[100];
+    char contents[10];
+
+    snprintf(dir, sizeof(dir), "/sys/class/ipmi/ipmi%d/device", device);
+
+    rv = verify_file_contents(ti, dir, "nr_msgs", "0\n");
+    if (rv)
+	return rv;
+
+    snprintf(contents, sizeof(contents), "%d\n", nr_users);
+
+    rv = verify_file_contents(ti, dir, "nr_users", contents);
+    if (rv)
+	return rv;
+
+    return 0;
+}
+
+static int
 test_bmcs(struct tinfo *ti)
 {
     int rv;
@@ -907,6 +929,16 @@ test_cmd(struct tinfo *ti)
     /* Response may or may not make it back, but just ignore it. */
     sb3->free_after_send = true;
 
+    /*
+     * Can't do this here, there is still a message
+     * outstanding. nr_msgs can be 1 or 0.
+     */
+#if 0
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
+#endif
+
     rv = helper_cmd_resp(ti, NULL, "Close", "0");
     if (rv)
 	return rv;
@@ -966,6 +998,10 @@ test_cmd(struct tinfo *ti)
 	return 1;
     }
     helperbuf_unlink_free(ti, sb);
+
+    rv = check_close(ti, 1, 1);
+    if (rv)
+	return rv;
 
     rv = helper_cmd_resp(ti, NULL, "Close", "0");
     if (rv)
@@ -1099,6 +1135,7 @@ test_host_cmd(struct tinfo *ti)
     rv = helper_wait_done(cw.sb);
     if (rv)
 	helper_wait_done_print_err(rv, cw.sb, "Response", "");
+    helperbuf_unlink_free(ti, cw.sb);
 
     rv = ipmi_wait_done(ib);
     if (rv) {
@@ -1108,6 +1145,10 @@ test_host_cmd(struct tinfo *ti)
 	ib = NULL;
 	return rv;
     }
+
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
 
     rv = helper_cmd_resp(ti, NULL, "Close", "0");
     if (rv)
@@ -1121,8 +1162,6 @@ test_host_cmd(struct tinfo *ti)
  out_err:
     if (ib)
 	free_ipmibuf(ib);
-    if (cw.sb)
-	helperbuf_free(cw.sb);
     return rv;
 }
 
@@ -1230,6 +1269,14 @@ test_hotmod(struct tinfo *ti)
 	return 1;
     }
 
+    /*
+     * Check this here instead of by the close because we are removing
+     * the device.  We can't access the data after the hotmod removal.
+     */
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
+
     rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
 			 "/sys/module/ipmi_si/parameters/hotmod",
 			 "remove,bt,i/o,0xe4");
@@ -1333,6 +1380,10 @@ test_events(struct tinfo *ti)
 	return 1;
     }
 
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
+
     rv = helper_cmd_resp(ti, NULL, "Close", "0");
     if (rv)
 	return rv;
@@ -1423,6 +1474,14 @@ test_events(struct tinfo *ti)
 	pr_err_s("Extra event received\n");
 	return 1;
     }
+
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
+
+    rv = check_close(ti, 0, 1);
+    if (rv)
+	return rv;
 
     rv = helper_cmd_resp(ti, NULL, "Close", "0");
     if (rv)
@@ -1677,12 +1736,13 @@ struct ipmi_dev_info {
     int ipmi_devnum;
     struct ipmi_cmd *cmds;
     unsigned int cmds_size;
+    int close_users_count;
 } ipmi_stress_devs[] = {
-    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
-    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE },
-    { 1, ipmi_cmds_bmc1, BMC1_CMDS_SIZE },
-    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE },
-    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE },
+    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE, 2 },
+    { 0, ipmi_cmds_bmc0, BMC0_CMDS_SIZE, 1 },
+    { 1, ipmi_cmds_bmc1, BMC1_CMDS_SIZE, 1 },
+    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE, 2 },
+    { 2, ipmi_cmds_bmc0_2, BMC0_2_CMDS_SIZE, 1 },
 };
 #define NUM_IPMI_STRESS_DEVS ARRAY_SIZE(ipmi_stress_devs)
 
@@ -1741,7 +1801,7 @@ test_stress(struct tinfo *ti)
 	if (ti->rv)
 	    return 1;
 	for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
-	    if (sb[i]->rc)
+	    if (sb[i] && sb[i]->rc)
 		return 1;
 	    if (count[i] < num_stress_cmds && sb[i]->got_resp) {
 		struct ipmi_cmd *cmd = &ipmi_cmds[i][curr_cmd[i]];
@@ -1756,6 +1816,7 @@ test_stress(struct tinfo *ti)
 		}
 		/* FIXME - add response check. */
 		helperbuf_unlink_free(ti, sb[i]);
+		sb[i] = NULL;
 		count[i]++;
 		if (count[i] >= num_stress_cmds) {
 		    num_left--;
@@ -1771,6 +1832,11 @@ test_stress(struct tinfo *ti)
     }
 
     for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
+	rv = check_close(ti, ipmi_stress_devs[i].ipmi_devnum,
+			 ipmi_stress_devs[i].close_users_count);
+	if (rv)
+	    return rv;
+
 	rv = helper_cmd_resp(ti, NULL, "Close", "%d", i);
 	if (rv)
 	    return rv;
@@ -2451,6 +2517,8 @@ main(int argc, char *argv[])
     }
 
  out_close:
+    if (ti.helper)
+	gensio_free(ti.helper);
     if (ti.waiter)
 	gensio_os_funcs_free_waiter(ti.o, ti.waiter);
     if (ti.sleeper)
