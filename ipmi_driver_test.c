@@ -1273,6 +1273,8 @@ test_events(struct tinfo *ti)
     struct ipmi_system_interface_addr si;
     static uint8_t event_data[] = { 0x40, 0x03, 1, 2, 3, 4, 5, 6 };
     static char expected_event[] = { "40 10 03 01 02 03 04 05 06" };
+    static uint8_t event_data2[] = { 0x40, 0x03, 9, 10, 11, 12, 13, 14 };
+    static char expected_event2[] = { "40 10 03 09 0a 0b 0c 0d 0e" };
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
     if (rv)
@@ -1314,7 +1316,6 @@ test_events(struct tinfo *ti)
     l = gensio_list_first(&ti->eventlist);
     gensio_list_rm(&ti->eventlist, l);
     ev = gensio_container_of(l, struct eventbuf, link);
-    gensio_os_funcs_zfree(ti->o, ev);
 
     if (ev->devidx != 0) {
 	pr_err("Event from unexpected device %d\n", ev->devidx);
@@ -1325,6 +1326,98 @@ test_events(struct tinfo *ti)
 	       ev->data + 21, expected_event);
 	return 1;
     }
+    gensio_os_funcs_zfree(ti->o, ev);
+
+    if (!gensio_list_empty(&ti->eventlist)) {
+	pr_err_s("Extra event received\n");
+	return 1;
+    }
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    /* Test received events while no one is listening. */
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_SENSOR_EVENT_NETFN, IPMI_PLATFORM_EVENT_CMD,
+		       event_data, sizeof(event_data),
+		       false, NULL);
+    if (rv)
+	return rv;
+
+    /* Event queue is only 1 deep in the BMC, git a second for the
+       event to be delivered. */
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_SENSOR_EVENT_NETFN, IPMI_PLATFORM_EVENT_CMD,
+		       event_data2, sizeof(event_data2),
+		       false, NULL);
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "EvEnable", "0 1");
+    if (rv)
+	return rv;
+
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+
+    while (gensio_list_empty(&ti->eventlist)) {
+	rv = gensio_os_funcs_service(ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED) {
+	    pr_err_s("Warning: Didn't get 1st event\n");
+	    return rv;
+	}
+    }
+    l = gensio_list_first(&ti->eventlist);
+    gensio_list_rm(&ti->eventlist, l);
+    ev = gensio_container_of(l, struct eventbuf, link);
+
+    if (ev->devidx != 0) {
+	pr_err("Event from unexpected device %d\n", ev->devidx);
+	return 1;
+    }
+    if (strcmp(ev->data + 21, expected_event) != 0) {
+	pr_err("Unexpected event data, got '%s', expected '%s'",
+	       ev->data + 21, expected_event);
+	return 1;
+    }
+    gensio_os_funcs_zfree(ti->o, ev);
+
+    while (gensio_list_empty(&ti->eventlist)) {
+	rv = gensio_os_funcs_service(ti->o, &timeout);
+	if (rv && rv != GE_INTERRUPTED) {
+	    pr_err_s("Warning: Didn't get 2nd event\n");
+	    return rv;
+	}
+    }
+    l = gensio_list_first(&ti->eventlist);
+    gensio_list_rm(&ti->eventlist, l);
+    ev = gensio_container_of(l, struct eventbuf, link);
+
+    if (ev->devidx != 0) {
+	pr_err("Event from unexpected device %d\n", ev->devidx);
+	return 1;
+    }
+    if (strcmp(ev->data + 21, expected_event2) != 0) {
+	pr_err("Unexpected event data, got '%s', expected '%s'",
+	       ev->data + 21, expected_event2);
+	return 1;
+    }
+    gensio_os_funcs_zfree(ti->o, ev);
 
     if (!gensio_list_empty(&ti->eventlist)) {
 	pr_err_s("Extra event received\n");
