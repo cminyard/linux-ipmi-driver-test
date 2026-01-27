@@ -789,7 +789,7 @@ test_bmcs(struct tinfo *ti)
     if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
 			     "product_id", "0x0000\n"))
 	return 1;
-    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.0",
+    if (verify_file_contents(ti, "/sys/bus/platform/devices/ipmi_bmc.1",
 			     "ipmi_version", "2.0\n"))
 	return 1;
 
@@ -2338,10 +2338,12 @@ start_test_close(struct tinfo *ti)
 
     if (ti->helper) {
 	rv = gensio_close(ti->helper, helper_close_done, ti);
-	if (rv)
+	if (rv) {
 	    gensio_free(ti->helper);
-	else
+	    ti->helper = NULL;
+	} else {
 	    ti->close_wait_count++;
+	}
     }
 
     if (ti->close_wait_count == 0)
