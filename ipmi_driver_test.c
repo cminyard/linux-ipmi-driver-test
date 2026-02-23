@@ -1237,7 +1237,7 @@ test_hotmod(struct tinfo *ti)
 
     rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
 			 "/sys/module/ipmi_si/parameters/hotmod",
-			 "remove,bt,i/o,0xe4");
+			 "remove,kcs,i/o,0xca2");
     if (rv)
 	return rv;
 
@@ -1248,7 +1248,7 @@ test_hotmod(struct tinfo *ti)
 
     rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
 			 "/sys/module/ipmi_si/parameters/hotmod",
-			 "add,bt,i/o,0xe4,irq=5");
+			 "add,kcs,i/o,0xca2,irq=5");
     if (rv)
 	return rv;
 
@@ -1279,7 +1279,7 @@ test_hotmod(struct tinfo *ti)
 
     rv = helper_cmd_resp(ti, NULL, "Write", "%s %s",
 			 "/sys/module/ipmi_si/parameters/hotmod",
-			 "remove,bt,i/o,0xe4");
+			 "remove,kcs,i/o,0xca2");
     if (rv) {
 	helper_wait_done(sb);
 	helperbuf_unlink_free(sb->ti, sb);
@@ -1698,7 +1698,7 @@ struct ipmi_cmd ipmi_cmds_bmc1[] = {
     },
     {
 	.cmd = "si f 0 6 42 e",
-	.rsp = "si 0f 00 07 42 00 0f 0c 05 00 f2 1b 00 10 10"
+	.rsp = "si 0f 00 07 42 00 0f 0c 08 00 f2 1b 00 10 10"
     },
     {
 	.cmd = "si f 0 0 0",
@@ -1963,10 +1963,9 @@ handle_buf(struct tinfo *ti)
 	} else if (!sb->needs_resp && sb->free_after_send) {
 	    helperbuf_unlink_free(ti, sb);
 	} else {
-	    if (*end == ' ') {
+	    if (*end != '\0') {
 		/* Got an error. */
 		sb->rc = 1;
-		end++;
 	    }
 	    copy_string(sb->response, end, sizeof(sb->response));
 	    sb->done = true;
