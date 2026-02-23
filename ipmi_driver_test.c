@@ -1631,6 +1631,123 @@ test_panic_events(struct tinfo *ti)
     return rv;
 }
 
+static int
+test_bad_bmc(struct tinfo *ti)
+{
+    int rv;
+    struct ipmi_system_interface_addr si;
+    gensio_time timeout;
+    uint8_t chassis_disable_bmc_cmddata[1] = { 0xe };
+    uint8_t chassis_enable_bmc_cmddata[1] = { 0xf };
+    static char *bmc0_getdevid_rsp =
+	"0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
+    static char *bmc0_getdevid_bad_rsp = "0 si 0f 00 07 01 82";
+    static char *bmc0_getdevid_bad_rsp2 = "Send error: Input/output error";
+    struct helperbuf *sb = NULL;
+
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	goto out_err;
+
+    /* Validate that the BMC works. */
+    rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc0_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    helperbuf_unlink_free(ti, sb);
+
+    /* Disable the BMC. */
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_CHASSIS_NETFN, IPMI_CHASSIS_CONTROL_CMD,
+		       chassis_disable_bmc_cmddata,
+		       sizeof(chassis_disable_bmc_cmddata),
+		       false, NULL);
+    if (rv)
+	return rv;
+
+    /* Validate a command fails. */
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc0_getdevid_bad_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_bad_rsp, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    helperbuf_unlink_free(ti, sb);
+
+    /* Validate that the command fails again. */
+    sb = helper_send_cmd(ti, "Command", "0 si f 0 6 1");
+    if (!sb)
+	return 1;
+    rv = helper_wait_done(sb);
+    if (rv != -1) {
+	pr_err_s("BMC didn't error properly\n");
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    if (strcmp(sb->response, bmc0_getdevid_bad_rsp2) != 0) {
+	pr_err("Invalid BMC get error resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_bad_rsp2, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    helperbuf_unlink_free(ti, sb);
+
+    /* Enable the BMC. */
+    si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
+    si.channel = 0xf;
+    si.lun = 0;
+    rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
+		       IPMI_CHASSIS_NETFN, IPMI_CHASSIS_CONTROL_CMD,
+		       chassis_enable_bmc_cmddata,
+		       sizeof(chassis_enable_bmc_cmddata),
+		       false, NULL);
+    if (rv)
+	return rv;
+
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+    /* Validate that the BMC works again. */
+    rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
+    if (rv)
+	return rv;
+    if (strcmp(sb->response, bmc0_getdevid_rsp) != 0) {
+	pr_err("Invalid BMC get devid resp, expected '%s', got '%s'\n",
+	       bmc0_getdevid_rsp, sb->response);
+	helperbuf_unlink_free(ti, sb);
+	return 1;
+    }
+    helperbuf_unlink_free(ti, sb);
+
+    rv = helper_cmd_resp(ti, NULL, "Close", "0");
+    if (rv)
+	return rv;
+
+    rv = helper_cmd_resp(ti, NULL, "Unload",
+			 "ipmi_devintf ipmi_si ipmi_msghandler");
+    if (rv)
+	return rv;
+
+ out_err:
+    return rv;
+}
+
 /* A bunch of different commands for random testing. */
 struct ipmi_cmd {
     char *cmd;
@@ -1863,6 +1980,7 @@ struct teststr {
     { "Test hotmod", test_hotmod },
     { "Test event", test_events },
     { "Test under stress", test_stress },
+    { "Test BMC not responding", test_bad_bmc },
 };
 #define TESTS_SIZE ARRAY_SIZE(tests)
 
