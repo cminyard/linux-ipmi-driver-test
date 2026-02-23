@@ -1319,9 +1319,9 @@ test_events(struct tinfo *ti)
     struct eventbuf *ev;
     struct ipmi_system_interface_addr si;
     static uint8_t event_data[] = { 0x40, 0x03, 1, 2, 3, 4, 5, 6 };
-    static char expected_event[] = { "40 10 03 01 02 03 04 05 06" };
+    static char expected_event[] = { "81 10 40 03 01 02 03 04 05" };
     static uint8_t event_data2[] = { 0x40, 0x03, 9, 10, 11, 12, 13, 14 };
-    static char expected_event2[] = { "40 10 03 09 0a 0b 0c 0d 0e" };
+    static char expected_event2[] = { "81 10 40 03 09 0a 0b 0c 0d" };
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
     if (rv)
@@ -1498,7 +1498,7 @@ test_events(struct tinfo *ti)
 #define NUM_PANIC_EVENTS 3
 #define PANIC_EVENT_SIZE 14
 static uint8_t panic_events[NUM_PANIC_EVENTS][PANIC_EVENT_SIZE] = {
-    { 0x02, 0xcf, 0xcf, 0x51, 0x00, 0x41, 0xf0,
+    { 0x02, 0xcf, 0xcf, 0x51, 0x00, 0x41, 0x00,
       0x03, 0x20, 0x73, 0x6f, 0xa1, 0x79, 0x73, },
     { 0xf0, 0x20, 0x00, 0x73, 0x79, 0x73, 0x72,
       0x71, 0x20, 0x74, 0x72, 0x69, 0x67, 0x67, },
@@ -1698,7 +1698,7 @@ struct ipmi_cmd ipmi_cmds_bmc1[] = {
     },
     {
 	.cmd = "si f 0 6 42 e",
-	.rsp = "si 0f 00 07 42 c1"
+	.rsp = "si 0f 00 07 42 00 0f 0c 05 00 f2 1b 00 10 10"
     },
     {
 	.cmd = "si f 0 0 0",
