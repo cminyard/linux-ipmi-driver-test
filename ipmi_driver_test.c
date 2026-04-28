@@ -1637,8 +1637,8 @@ test_bad_bmc(struct tinfo *ti)
     int rv;
     struct ipmi_system_interface_addr si;
     gensio_time timeout;
-    uint8_t chassis_disable_bmc_cmddata[1] = { 0xe };
-    uint8_t chassis_enable_bmc_cmddata[1] = { 0xf };
+    uint8_t chassis_disable_bmc_cmddata[1] = { 0x1f };
+    uint8_t chassis_enable_bmc_cmddata[1] = { 0x0f };
     static char *bmc0_getdevid_rsp =
 	"0 si 0f 00 07 01 00 00 03 09 08 02 9f 91 12 00 02 0f 00 00 00 00";
     static char *bmc0_getdevid_bad_rsp = "0 si 0f 00 07 01 82";
