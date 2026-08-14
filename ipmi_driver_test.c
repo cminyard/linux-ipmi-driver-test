@@ -707,6 +707,11 @@ test_bmcs(struct tinfo *ti)
     if (rv)
 	return rv;
 
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = helper_cmd_resp(ti, &sb, "Runcmd", "ls /sys/bus/platform/devices");
     if (rv)
 	return rv;
@@ -1241,6 +1246,10 @@ test_hotmod(struct tinfo *ti)
     if (rv)
 	return rv;
 
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
     if (rv)
@@ -1251,6 +1260,10 @@ test_hotmod(struct tinfo *ti)
 			 "add,kcs,i/o,0xca2,irq=5");
     if (rv)
 	return rv;
+
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi0", "ipmi1", NULL);
@@ -1286,6 +1299,10 @@ test_hotmod(struct tinfo *ti)
 	return rv;
     }
 
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
     if (rv)
@@ -1314,7 +1331,6 @@ static int
 test_events(struct tinfo *ti)
 {
     int rv;
-    gensio_time timeout = { 2, 0 };
     struct gensio_link *l, *l2;
     struct eventbuf *ev;
     struct ipmi_system_interface_addr si;
@@ -1322,10 +1338,16 @@ test_events(struct tinfo *ti)
     static char expected_event[] = { "81 10 40 03 01 02 03 04 05" };
     static uint8_t event_data2[] = { 0x40, 0x03, 9, 10, 11, 12, 13, 14 };
     static char expected_event2[] = { "81 10 40 03 09 0a 0b 0c 0d" };
+    gensio_time timeout;
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
     if (rv)
 	return rv;
+
+    /* Give a little time for the driver to create everything. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
@@ -1354,6 +1376,8 @@ test_events(struct tinfo *ti)
 	return rv;
 
     while (gensio_list_empty(&ti->eventlist)) {
+	timeout.secs = 2;
+	timeout.nsecs = 0;
 	rv = gensio_os_funcs_service(ti->o, &timeout);
 	if (rv && rv != GE_INTERRUPTED) {
 	    pr_err_s("Warning: Didn't get event\n");
@@ -1883,7 +1907,6 @@ test_stress(struct tinfo *ti)
     timeout.secs = 2;
     timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
-
 
     /* Open NUM_IPMI_STRESS_DEVS IPMI devices. */
     for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
