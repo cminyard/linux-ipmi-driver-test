@@ -989,6 +989,10 @@ test_cmd(struct tinfo *ti)
     if (rv)
 	return 1;
 
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     rv = helper_cmd_resp(ti, NULL, "Open", "0 1");
     if (rv)
 	return rv;
@@ -1550,6 +1554,10 @@ test_panic_events(struct tinfo *ti)
     si.channel = 0xf;
     si.lun = 0;
 
+    timeout.secs = 2;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
     /* Clear the SEL. */
     rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
 		       IPMI_STORAGE_NETFN, IPMI_CLEAR_SEL_CMD,
@@ -1568,7 +1576,9 @@ test_panic_events(struct tinfo *ti)
 	goto out_err;
     }
 
-    /* Make sure the events have to to get into the event queue. */
+    /* Make sure the events have time to get into the event queue. */
+    timeout.secs = 2;
+    timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     /* Fetch the events. */
@@ -1910,8 +1920,8 @@ test_stress(struct tinfo *ti)
 
     /* Open NUM_IPMI_STRESS_DEVS IPMI devices. */
     for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
-	     rv = helper_cmd_resp(ti, NULL, "Open", "%d %d", i,
-				  ipmi_stress_devs[i].ipmi_devnum);
+	rv = helper_cmd_resp(ti, NULL, "Open", "%d %d", i,
+			     ipmi_stress_devs[i].ipmi_devnum);
 	 if (rv)
 	     return rv;
 	 ipmi_cmds[i] = ipmi_stress_devs[i].cmds;
