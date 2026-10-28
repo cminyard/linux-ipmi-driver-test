@@ -340,6 +340,13 @@ free_ipmibuf(struct ipmibuf *ib)
     gensio_os_funcs_zfree(ib->ti->o, ib);
 }
 
+static void do_wait(struct tinfo *ti, long secs, long usecs)
+{
+    gensio_time timeout = { secs, usecs };
+
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+}
+
 static int
 ipmi_rsp_handler(ipmi_con_t *icon, ipmi_msgi_t *rspi)
 {
@@ -666,14 +673,13 @@ test_bmcs(struct tinfo *ti)
     struct helperbuf *sb;
     char *t, *saveptr;
     bool found = false, found2 = false;
-    gensio_time timeout = { 2, 0 };
 
     rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_ssif");
     if (rv)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 1, 0);
 
     rv = helper_cmd_resp(ti, &sb, "Runcmd", "ls /sys/bus/platform/devices");
     if (rv)
@@ -708,9 +714,7 @@ test_bmcs(struct tinfo *ti)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 1, 0);
 
     rv = helper_cmd_resp(ti, &sb, "Runcmd", "ls /sys/bus/platform/devices");
     if (rv)
@@ -839,27 +843,22 @@ test_cmd(struct tinfo *ti)
     unsigned int count;
     unsigned int restart_count = 0;
     const char *module = "ipmi_ssif";
-    gensio_time timeout;
 
-    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf");
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf");
     if (rv)
 	return rv;
 
     /* Let the si driver start. */
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Now let the ssif driver start. */
-    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_ssif");
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_ssif");
     if (rv)
 	return rv;
 
  restart:
     /* Give a little time for the drivers to create everything. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
@@ -995,17 +994,13 @@ test_cmd(struct tinfo *ti)
 	goto restart;
     }
 
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_si");
     if (rv)
 	return 1;
 
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = helper_cmd_resp(ti, NULL, "Open", "0 1");
     if (rv)
@@ -1105,9 +1100,7 @@ test_host_cmd(struct tinfo *ti)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
@@ -1139,6 +1132,9 @@ test_host_cmd(struct tinfo *ti)
     rv = helper_cmd_resp(ti, NULL, "Register", "0 6 1");
     if (rv)
 	goto out_err;
+
+    /* Give a little time for it to take effect. */
+    do_wait(ti, 1, 0);
 
     rv = send_ipmi_msg(ti, (ipmi_addr_t *) &si, sizeof(si), 6, 1, NULL, 0, &ib);
     if (rv)
@@ -1242,7 +1238,6 @@ test_hotmod(struct tinfo *ti)
     struct helperbuf *sb = NULL;
     int rv;
     struct cmdwaiter cw;
-    gensio_time timeout;
 
     memset(&cw, 0, sizeof(cw));
 
@@ -1251,9 +1246,7 @@ test_hotmod(struct tinfo *ti)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Basic delete/add tests. */
     rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
@@ -1267,9 +1260,7 @@ test_hotmod(struct tinfo *ti)
     if (rv)
 	return rv;
 
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
@@ -1282,9 +1273,7 @@ test_hotmod(struct tinfo *ti)
     if (rv)
 	return rv;
 
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi0", "ipmi1", NULL);
@@ -1320,9 +1309,7 @@ test_hotmod(struct tinfo *ti)
 	return rv;
     }
 
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 1, 0);
 
     rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
@@ -1366,9 +1353,7 @@ test_events(struct tinfo *ti)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     rv = helper_cmd_resp(ti, NULL, "Open", "0 0");
     if (rv)
@@ -1397,7 +1382,7 @@ test_events(struct tinfo *ti)
 	return rv;
 
     while (gensio_list_empty(&ti->eventlist)) {
-	timeout.secs = 2;
+	timeout.secs = 4;
 	timeout.nsecs = 0;
 	rv = gensio_os_funcs_service(ti->o, &timeout);
 	if (rv && rv != GE_INTERRUPTED) {
@@ -1446,9 +1431,7 @@ test_events(struct tinfo *ti)
 
     /* Event queue is only 1 deep in the BMC, git a second for the
        event to be delivered. */
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 1, 0);
 
     si.addr_type = IPMI_SYSTEM_INTERFACE_ADDR_TYPE;
     si.channel = 0xf;
@@ -1557,7 +1540,6 @@ test_panic_events(struct tinfo *ti)
     int rv;
     struct ipmibuf *ib;
     struct ipmi_system_interface_addr si;
-    gensio_time timeout = { 2, 0 };
     uint8_t clr_sel_cmddata[6] = { 0x00, 0x00, 'C', 'L', 'R', 0xaa };
     uint8_t get_sel_cmddata[6] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0xff };
     uint8_t chassis_reset_cmddata[1] = { 0x3 };
@@ -1571,9 +1553,7 @@ test_panic_events(struct tinfo *ti)
     si.channel = 0xf;
     si.lun = 0;
 
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Clear the SEL. */
     rv = ipmi_cmd_resp(ti, (ipmi_addr_t *) &si, sizeof(si),
@@ -1594,9 +1574,7 @@ test_panic_events(struct tinfo *ti)
     }
 
     /* Make sure the events have time to get into the event queue. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Fetch the events. */
     for (i = 0; ; i++) {
@@ -1667,9 +1645,7 @@ test_panic_events(struct tinfo *ti)
 	goto out_err;
 
     /* Wait for the reset to complete. */
-    timeout.secs = 10;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 10, 0);
 
     rv = gensio_open_s(ti->helper);
     if (rv) {
@@ -1687,7 +1663,6 @@ test_bad_bmc(struct tinfo *ti)
 {
     int rv;
     struct ipmi_system_interface_addr si;
-    gensio_time timeout;
     uint8_t chassis_disable_bmc_cmddata[1] = { 0x1f };
     uint8_t chassis_enable_bmc_cmddata[1] = { 0x0f };
     static char *bmc0_getdevid_rsp =
@@ -1770,9 +1745,7 @@ test_bad_bmc(struct tinfo *ti)
     if (rv)
 	return rv;
 
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Validate that the BMC works again. */
     rv = helper_cmd_resp(ti, &sb, "Command", "0 si f 0 6 1");
@@ -1926,24 +1899,20 @@ test_stress(struct tinfo *ti)
     gensio_time timeout;
     unsigned int i, num_left = NUM_IPMI_STRESS_DEVS;
 
-    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_si");
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_msghandler ipmi_devintf ipmi_si");
     if (rv)
 	return rv;
 
     /* Let the si driver start. */
-    timeout.secs = 1;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Now let the ssif driver start. */
-    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_ssif");
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_ssif");
     if (rv)
 	return rv;
 
     /* Give a little time for the driver to create everything. */
-    timeout.secs = 2;
-    timeout.nsecs = 0;
-    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+    do_wait(ti, 2, 0);
 
     /* Open NUM_IPMI_STRESS_DEVS IPMI devices. */
     for (i = 0; i < NUM_IPMI_STRESS_DEVS; i++) {
@@ -1987,8 +1956,8 @@ test_stress(struct tinfo *ti)
 		    printf("%d done %d %d\n", i, curr_cmd[i], count[i]);
 		if (atoi(sb[i]->response) != i ||
 			strcmp(cmd->rsp, sb[i]->response + 2) != 0) {
-		    pr_err("Invalid response to command '%s', expected '%d %s', got '%s'\n",
-			   cmd->cmd, i, cmd->rsp, sb[i]->response);
+		    pr_err("Iteration %u: Invalid response to command '%s', expected '%d %s', got '%s'\n",
+			   count[i], cmd->cmd, i, cmd->rsp, sb[i]->response);
 		    return 1;
 		}
 		/* FIXME - add response check. */
@@ -2642,9 +2611,7 @@ main(int argc, char *argv[])
 	    goto out_wait_close;
 	}
 	/* Wait for power up to complete. */
-	timeout.secs = 10;
-	timeout.nsecs = 0;
-	gensio_os_funcs_wait(ti.o, ti.sleeper, 1, &timeout);
+	do_wait(&ti, 10, 0);
 	printf(" done\n");
     }
 
@@ -2679,9 +2646,7 @@ main(int argc, char *argv[])
 	    fprintf(stderr, "Unable to send Runcmd poweroff");
 	    goto out_close;
 	}
-	timeout.secs = 2;
-	timeout.nsecs = 0;
-	gensio_os_funcs_wait(ti.o, ti.sleeper, 1, &timeout);
+	do_wait(&ti, 2, 0);
 	helperbuf_unlink_free(sb->ti, sb);
     }
 
