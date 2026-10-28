@@ -550,15 +550,15 @@ helper_wait_done(struct helperbuf *sb)
 }
 
 static void
-helper_wait_done_print_err(int rv, struct helperbuf *sb,
+helper_wait_done_print_err(unsigned int line, int rv, struct helperbuf *sb,
 			   const char *cmd, const char *str)
 {
     if (rv > 0) {
-	pr_err("Command %s %s: Error waiting on helperbuf: %s\n",
-	       cmd, str, gensio_err_to_str(rv));
+	pr_err("(line %u) Command %s %s: Error waiting on helperbuf: %s\n",
+	       line, cmd, str, gensio_err_to_str(rv));
     } else if (rv < 0) {
-	pr_err("Command %s %s: Load error response: %s\n",
-	       cmd, str, sb->response);
+	pr_err("(line %u) Command %s %s: Load error response: %s\n",
+	       line, cmd, str, sb->response);
     }
 }
 
@@ -581,7 +581,7 @@ helper_cmd_resp(struct tinfo *ti, struct helperbuf **rsb,
     }
     rv = helper_wait_done(sb);
     if (rv) {
-	helper_wait_done_print_err(rv, sb, cmd, str);
+	helper_wait_done_print_err(__LINE__, rv, sb, cmd, str);
 	rv = 1;
     }
     if (rsb)
@@ -841,12 +841,22 @@ test_cmd(struct tinfo *ti)
     const char *module = "ipmi_ssif";
     gensio_time timeout;
 
-    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_ssif");
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf");
+    if (rv)
+	return rv;
+
+    /* Let the si driver start. */
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+    /* Now let the ssif driver start. */
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_ssif");
     if (rv)
 	return rv;
 
  restart:
-    /* Give a little time for the driver to create everything. */
+    /* Give a little time for the drivers to create everything. */
     timeout.secs = 2;
     timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
@@ -971,7 +981,7 @@ test_cmd(struct tinfo *ti)
 	}
     }
     if (rv) {
-	helper_wait_done_print_err(rv, sb, "Unload", module);
+	helper_wait_done_print_err(__LINE__, rv, sb, "Unload", module);
 	return 1;
     }
     helperbuf_unlink_free(ti, sb);
@@ -984,6 +994,10 @@ test_cmd(struct tinfo *ti)
 	module = "ipmi_si";
 	goto restart;
     }
+
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_si");
     if (rv)
@@ -1143,7 +1157,7 @@ test_host_cmd(struct tinfo *ti)
 
     rv = helper_wait_done(cw.sb);
     if (rv)
-	helper_wait_done_print_err(rv, cw.sb, "Response", "");
+	helper_wait_done_print_err(__LINE__, rv, cw.sb, "Response", "");
     helperbuf_unlink_free(ti, cw.sb);
 
     rv = ipmi_wait_done(ib);
@@ -1175,7 +1189,8 @@ test_host_cmd(struct tinfo *ti)
 }
 
 static int
-cmp_file_list(struct tinfo *ti, const char *name, const char *dir, ...)
+cmp_file_list(struct tinfo *ti, unsigned int line,
+	      const char *name, const char *dir, ...)
 {
     int rv;
     va_list ap;
@@ -1197,15 +1212,17 @@ cmp_file_list(struct tinfo *ti, const char *name, const char *dir, ...)
     s = va_arg(ap, char *);
     do {
 	if (t == NULL && s != NULL) {
-	    pr_err("Dump %s unexpected extra item: %s\n", name, s);
+	    pr_err("(line %u) Dump %s unexpected extra item: %s\n", line,
+		   name, s);
 	    goto out;
 	}
 	if (t != NULL && s == NULL) {
-	    pr_err("Dump %s missing item: %s\n", name, t);
+	    pr_err("(line %u) Dump %s missing item: %s\n", line, name, t);
 	    goto out;
 	}
 	if (strcmp(t, s) != 0) {
-	    pr_err("Dump %s got item %s, expected %s\n", name, t, s);
+	    pr_err("(line %u) Dump %s got item %s, expected %s\n", line,
+		   name, t, s);
 	    goto out;
 	}
 	t = strtok_r(NULL, " \t\n", &saveptr);
@@ -1239,7 +1256,7 @@ test_hotmod(struct tinfo *ti)
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
     /* Basic delete/add tests. */
-    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+    rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi0", "ipmi1", NULL);
     if (rv)
 	return rv;
@@ -1254,7 +1271,7 @@ test_hotmod(struct tinfo *ti)
     timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
-    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+    rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
     if (rv)
 	return rv;
@@ -1269,7 +1286,7 @@ test_hotmod(struct tinfo *ti)
     timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
-    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+    rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi0", "ipmi1", NULL);
     if (rv)
 	return rv;
@@ -1307,14 +1324,14 @@ test_hotmod(struct tinfo *ti)
     timeout.nsecs = 0;
     gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
 
-    rv = cmp_file_list(ti, "ipmi devices", "/sys/class/ipmi",
+    rv = cmp_file_list(ti, __LINE__, "ipmi devices", "/sys/class/ipmi",
 		       "ipmi1", NULL);
     if (rv)
 	return rv;
 
     rv = helper_wait_done(sb);
     if (rv) {
-	helper_wait_done_print_err(rv, sb, "Command", "0 si f 0 6 1");
+	helper_wait_done_print_err(__LINE__, rv, sb, "Command", "0 si f 0 6 1");
 	rv = 1;
     }
     helperbuf_unlink_free(sb->ti, sb);
@@ -1909,7 +1926,17 @@ test_stress(struct tinfo *ti)
     gensio_time timeout;
     unsigned int i, num_left = NUM_IPMI_STRESS_DEVS;
 
-    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_si ipmi_ssif");
+    rv = helper_cmd_resp(ti, NULL, "Load", "i2c-i801 ipmi_msghandler ipmi_devintf ipmi_si");
+    if (rv)
+	return rv;
+
+    /* Let the si driver start. */
+    timeout.secs = 1;
+    timeout.nsecs = 0;
+    gensio_os_funcs_wait(ti->o, ti->sleeper, 1, &timeout);
+
+    /* Now let the ssif driver start. */
+    rv = helper_cmd_resp(ti, NULL, "Load", "ipmi_ssif");
     if (rv)
 	return rv;
 
